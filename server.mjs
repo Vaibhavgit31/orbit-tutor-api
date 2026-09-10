@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -241,12 +242,13 @@ const realtimeTools = [
 // Unset, as on a laptop, nothing is gated and behaviour is unchanged.
 const accessCode = process.env.ACCESS_CODE || "";
 const accessCookie = "metabook_access";
+const accessSession = createHash("sha256").update("metabook-session:" + accessCode).digest("hex");
 
 function isAuthorised(request, requestUrl) {
   if (!accessCode) return true;
   if (requestUrl.searchParams.get("code") === accessCode) return true;
   const cookies = String(request.headers.cookie || "");
-  return cookies.split(";").some(part => part.trim() === accessCookie + "=" + accessCode);
+  return cookies.split(";").some(part => part.trim() === accessCookie + "=" + accessSession);
 }
 
 function sendAccessPrompt(response, wrong) {
@@ -265,7 +267,10 @@ ${wrong ? '<div class="bad">That code is not right.</div>' : ""}</form>`);
 }
 
 const server = createServer(async (request, response) => {
+  try {
   setCorsHeaders(response);
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
 
   if (request.method === "OPTIONS") {
     response.writeHead(204);
@@ -278,19 +283,31 @@ const server = createServer(async (request, response) => {
   // Everything except the health probe sits behind the access code when one is set.
   if (accessCode && requestUrl.pathname !== "/health") {
     if (!isAuthorised(request, requestUrl)) {
+      if (requestUrl.pathname.startsWith("/api/")) {
+        sendJson(response, 401, { error: "Open the site and enter its access code before using the tutor." });
+        return;
+      }
       sendAccessPrompt(response, requestUrl.searchParams.has("code"));
       return;
     }
     if (requestUrl.searchParams.get("code") === accessCode) {
+      const secure = request.socket.encrypted || request.headers["x-forwarded-proto"] === "https";
       response.setHeader("Set-Cookie",
-        `${accessCookie}=${accessCode}; Path=/; Max-Age=2592000; SameSite=Lax`);
+        `${accessCookie}=${accessSession}; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly${secure ? "; Secure" : ""}`);
+      if (request.method === "GET") {
+        requestUrl.searchParams.delete("code");
+        response.writeHead(303, { Location: requestUrl.pathname + requestUrl.search, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
     }
   }
-  console.log(`[HTTP] ${request.method} ${request.url}`);
+  console.log(`[HTTP] ${request.method} ${requestUrl.pathname}`);
 
   if (request.method === "GET" && requestUrl.pathname === "/health") {
     sendJson(response, 200, {
       ok: true,
+      deploymentRevision: process.env.RENDER_GIT_COMMIT || "local",
       aiConfigured: Boolean(apiKey),
       model,
       voiceMode,
@@ -357,6 +374,11 @@ const server = createServer(async (request, response) => {
   }
 
   sendJson(response, 404, { error: "Not found" });
+  } catch (error) {
+    console.error("Request failed:", error.name || "Error");
+    if (!response.headersSent) sendJson(response, error instanceof URIError ? 400 : 500, { error: "Request could not be processed." });
+    else response.end();
+  }
 });
 
 server.listen(port, () => {
@@ -555,13 +577,16 @@ function normaliseQuestion(text) {
 }
 
 function answerBankKey(lessonRequest) {
+  // A shared cache must never reuse a reply shaped by another learner's
+  // conversation or active assessment.
+  if (lessonRequest?.conversationHistory?.length || lessonRequest?.quizId) return "";
   const question = normaliseQuestion(lessonRequest?.studentMessage);
   if (!question) return "";
   // A follow-up such as "tell me about its moons" only makes sense next to the
   // planet it referred to, so the selected object is part of the key. Anything
   // that leans on earlier dialogue is not cacheable at all.
   const followUp = /\b(it|its|that|this|there|they|them|those|same)\b/.test(question);
-  if (followUp && !lessonRequest?.selectedObject) return "";
+  if (followUp) return "";
   return question + "||" + (lessonRequest?.selectedObject || "");
 }
 
