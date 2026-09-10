@@ -1,0 +1,18 @@
+{
+ "why is mars red||mars": {
+  "message": "Mars is often called the \"Red Planet\" because its surface is coated with iron oxide, commonly known as rust. This gives the planet its reddish appearance when viewed from Earth. \n\nWould you like to see a visual of Mars to get a better understanding of its surface?",
+  "outcome": "neutral",
+  "actions": [
+   {
+    "type": "visualize",
+    "target": "mars",
+    "targets": []
+   },
+   {
+    "type": "highlight",
+    "target": "mars",
+    "targets": []
+   }
+  ]
+ }
+}

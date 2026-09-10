@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metabook voice capture diagnostics</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 24px; font: 14px/1.5 system-ui, Segoe UI, sans-serif; background: #0b1220; color: #dce6f2; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; color: #7fe3ff; letter-spacing: .04em; text-transform: uppercase; }
+  .muted { color: #8fa3b8; }
+  .card { background: #111b2e; border: 1px solid #22314a; border-radius: 12px; padding: 16px; margin-top: 12px; }
+  label { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
+  select, button, input { font: inherit; }
+  select { background: #0b1220; color: #dce6f2; border: 1px solid #33456a; border-radius: 8px; padding: 6px 8px; min-width: 260px; }
+  button { background: #1d3557; color: #e8f4ff; border: 1px solid #3a5a8a; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button.primary { background: #1fb6d4; color: #06121a; border-color: #1fb6d4; font-weight: 600; }
+  button.danger { background: #7a2b2b; border-color: #a04040; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0; }
+  .meter { height: 14px; background: #0b1220; border: 1px solid #33456a; border-radius: 7px; overflow: hidden; width: 320px; }
+  .meter > div { height: 100%; width: 0; background: linear-gradient(90deg, #35d07f, #ffd166 70%, #ff5c5c); transition: width 60ms linear; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #22314a; vertical-align: top; }
+  th { color: #8fa3b8; font-weight: 500; }
+  code, .mono { font-family: Consolas, ui-monospace, monospace; font-size: 12.5px; }
+  canvas.env { width: 100%; height: 70px; background: #0b1220; border: 1px solid #22314a; border-radius: 8px; display: block; }
+  #log { max-height: 220px; overflow: auto; background: #070c16; border-radius: 8px; padding: 10px; font-family: Consolas, ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; }
+  .verdict { padding: 10px 12px; border-radius: 8px; background: #16243b; border-left: 4px solid #1fb6d4; margin-top: 8px; }
+  .bad { border-left-color: #ff5c5c; }
+  .warn { border-left-color: #ffd166; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; }
+  dt { color: #8fa3b8; }
+</style>
+</head>
+<body>
+<h1>Voice capture diagnostics</h1>
+<div class="muted">Development only. This page is served only while <code>VOICE_DEBUG=1</code>. Nothing here is part of the learner build.</div>
+
+<h2>1. Capture test (same code path as the app)</h2>
+<div class="card">
+  <div class="row">
+    <button id="permission">Allow microphone and list devices</button>
+    <select id="device"><option value="">(default microphone)</option></select>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="aec" checked> Echo cancellation</label>
+    <label><input type="checkbox" id="ns" checked> Noise suppression</label>
+    <label><input type="checkbox" id="agc" checked> Auto gain control</label>
+    <label>Opus bitrate
+      <select id="bitrate" style="min-width:120px">
+        <option value="0">browser default</option>
+        <option value="64000">64 kbps</option>
+        <option value="128000" selected>128 kbps</option>
+        <option value="192000">192 kbps</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">Start recording</button>
+    <button id="stop" disabled>Stop</button>
+    <span class="mono" id="timer">0.0 s</span>
+    <div class="meter"><div id="live"></div></div>
+    <span class="mono" id="liveDb">-∞ dBFS</span>
+  </div>
+  <dl id="trackInfo"></dl>
+  <div id="captureResult" hidden>
+    <canvas class="env" id="captureEnv" width="900" height="70"></canvas>
+    <div class="row">
+      <audio id="capturePlayer" controls></audio>
+      <a id="captureDownload" download="capture.webm"><button>Download original recording</button></a>
+      <button id="sendStt">Send this exact file to speech-to-text</button>
+      <span id="sttResult" class="mono"></span>
+    </div>
+    <div id="captureVerdict" class="verdict"></div>
+    <div class="muted">The app sends the browser's recording to the backend unchanged (no resampling, no re-encoding), so this file is byte-for-byte what speech-to-text receives. The backend saves that same file to the Desktop folder below.</div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button id="applyOverride">Use these capture settings in the app</button>
+    <button id="clearOverride">Clear app override</button>
+    <span id="overrideState" class="muted"></span>
+  </div>
+</div>
+
+<h2>2. Turns recorded by the app (Desktop/MetabookVoiceDebug)</h2>
+<div class="card">
+  <div class="row"><button id="refresh">Refresh list</button> <span class="muted">Analyze decodes the file in this browser and measures it. Speech should show peak above -20 dBFS, RMS above -35 dBFS, and speech-band ratio above 0.25.</span></div>
+  <table id="files"><thead><tr><th>Recorded</th><th>Stop / length / size</th><th>Transcript</th><th>Measurements</th><th></th></tr></thead><tbody></tbody></table>
+</div>
+
+<h2>3. Log</h2>
+<div id="log"></div>
+
+<script>
+(function () {
+  var logBox = document.getElementById("log");
+  function log(message) {
+    var stamp = new Date().toISOString().slice(11, 23);
+    logBox.textContent += stamp + "  " + message + "\n";
+    logBox.scrollTop = logBox.scrollHeight;
+    console.debug("[voice-debug] " + message);
+  }
+  function dbfs(value) { return value > 0 ? (20 * Math.log10(value)).toFixed(1) : "-inf"; }
+
+  // ---------------------------------------------------------------- analysis
+  var analysisContext = null;
+  function getAnalysisContext() {
+    if (!analysisContext) {
+      var AudioContextType = window.AudioContext || window.webkitAudioContext;
+      analysisContext = new AudioContextType();
+    }
+    return analysisContext;
+  }
+
+  // Decodes any browser-playable file and measures it: duration, peak, RMS,
+  // clipping, share of near-silent frames, energy in the 300-3400 Hz speech band
+  // versus the whole spectrum (muffled or missing speech shows as a low ratio),
+  // and a 50 ms envelope for the waveform strip.
+  function analyzeBuffer(arrayBuffer) {
+    return getAnalysisContext().decodeAudioData(arrayBuffer.slice(0)).then(function (audio) {
+      var data = audio.getChannelData(0);
+      var rate = audio.sampleRate;
+      var peak = 0, sumSquares = 0, clipped = 0;
+      var frame = Math.max(1, Math.round(rate * 0.05));
+      var envelope = [];
+      var silentFrames = 0, frames = 0;
+      for (var start = 0; start < data.length; start += frame) {
+        var end = Math.min(data.length, start + frame);
+        var frameEnergy = 0;
+        for (var i = start; i < end; i++) {
+          var v = data[i];
+          var a = Math.abs(v);
+          if (a > peak) peak = a;
+          if (a >= 0.985) clipped++;
+          frameEnergy += v * v;
+          sumSquares += v * v;
+        }
+        var frameRms = Math.sqrt(frameEnergy / (end - start));
+        envelope.push(frameRms);
+        frames++;
+        if (frameRms < 0.003) silentFrames++;
+      }
+      var rms = Math.sqrt(sumSquares / Math.max(1, data.length));
+      // Speech-band ratio via a cheap band-pass estimate: energy of a 300-3400 Hz
+      // filtered copy over total energy. Two-pole biquads applied in time domain.
+      var band = bandpassEnergy(data, rate, 300, 3400);
+      var total = sumSquares;
+      return {
+        durationMs: Math.round(audio.duration * 1000),
+        sampleRate: rate,
+        channels: audio.numberOfChannels,
+        peakDb: dbfs(peak),
+        rmsDb: dbfs(rms),
+        clippingPercent: (100 * clipped / Math.max(1, data.length)).toFixed(2),
+        silentPercent: (100 * silentFrames / Math.max(1, frames)).toFixed(0),
+        speechBandRatio: total > 0 ? (band / total).toFixed(2) : "0.00",
+        envelope: envelope,
+        peak: peak,
+        rms: rms
+      };
+    });
+  }
+
+  function bandpassEnergy(data, rate, low, high) {
+    // High-pass at `low` then low-pass at `high`, one-pole each, applied twice
+    // for a steeper slope. Adequate for a ratio; not a precision filter.
+    var hp = onePoleHighPass(onePoleHighPass(data, rate, low), rate, low);
+    var bp = onePoleLowPass(onePoleLowPass(hp, rate, high), rate, high);
+    var energy = 0;
+    for (var i = 0; i < bp.length; i++) energy += bp[i] * bp[i];
+    return energy;
+  }
+  function onePoleLowPass(input, rate, cutoff) {
+    var out = new Float32Array(input.length);
+    var rc = 1 / (2 * Math.PI * cutoff), dt = 1 / rate, alpha = dt / (rc + dt);
+    var y = 0;
+    for (var i = 0; i < input.length; i++) { y += alpha * (input[i] - y); out[i] = y; }
+    return out;
+  }
+  function onePoleHighPass(input, rate, cutoff) {
+    var out = new Float32Array(input.length);
+    var rc = 1 / (2 * Math.PI * cutoff), dt = 1 / rate, alpha = rc / (rc + dt);
+    var y = 0, prev = 0;
+    for (var i = 0; i < input.length; i++) { y = alpha * (y + input[i] - prev); prev = input[i]; out[i] = y; }
+    return out;
+  }
+
+  function drawEnvelope(canvas, envelope) {
+    var ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#1fb6d4";
+    var w = canvas.width / Math.max(1, envelope.length);
+    for (var i = 0; i < envelope.length; i++) {
+      var h = Math.min(1, envelope[i] * 4) * canvas.height;
+      ctx.fillRect(i * w, canvas.height - h, Math.max(1, w - 1), h);
+    }
+    ctx.strokeStyle = "#ff5c5c";
+    ctx.setLineDash([4, 4]);
+    var quiet = 0.02 * 4 * canvas.height; // -34 dBFS reference line
+    ctx.beginPath(); ctx.moveTo(0, canvas.height - quiet); ctx.lineTo(canvas.width, canvas.height - quiet); ctx.stroke();
+  }
+
+  function verdictFor(m) {
+    var problems = [];
+    if (m.peak < 0.1) problems.push("very low level (peak " + m.peakDb + " dBFS): the microphone signal is faint or the wrong device was used");
+    else if (m.rms < 0.018) problems.push("quiet speech (RMS " + m.rmsDb + " dBFS)");
+    if (Number(m.clippingPercent) > 0.5) problems.push("clipping on " + m.clippingPercent + "% of samples: gain too high");
+    if (Number(m.speechBandRatio) < 0.25 && m.peak >= 0.1) problems.push("little energy in the speech band (ratio " + m.speechBandRatio + "): muffled or non-speech content");
+    if (Number(m.silentPercent) > 85) problems.push(m.silentPercent + "% of the recording is silent");
+    if (m.durationMs < 700) problems.push("only " + m.durationMs + " ms long: the turn was cut short");
+    return problems.length ? { cls: m.peak < 0.1 || Number(m.silentPercent) > 85 ? "bad" : "warn", text: "Problems: " + problems.join("; ") + "." }
+      : { cls: "", text: "Looks healthy: peak " + m.peakDb + " dBFS, RMS " + m.rmsDb + " dBFS, speech-band ratio " + m.speechBandRatio + ", " + m.durationMs + " ms." };
+  }
+
+  // ---------------------------------------------------------------- capture
+  var stream = null, recorder = null, chunks = [], meterTimer = null, startedAt = 0, lastBlob = null, meterContext = null;
+  var startButton = document.getElementById("start"), stopButton = document.getElementById("stop");
+
+  function selectedConstraints() {
+    var audio = {
+      echoCancellation: document.getElementById("aec").checked,
+      noiseSuppression: document.getElementById("ns").checked,
+      autoGainControl: document.getElementById("agc").checked,
+      channelCount: 1
+    };
+    var device = document.getElementById("device").value;
+    if (device) audio.deviceId = { exact: device };
+    return audio;
+  }
+
+  document.getElementById("permission").onclick = function () {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      s.getTracks().forEach(function (t) { t.stop(); });
+      return navigator.mediaDevices.enumerateDevices();
+    }).then(function (devices) {
+      var select = document.getElementById("device");
+      select.innerHTML = "<option value=''>(default microphone)</option>";
+      devices.filter(function (d) { return d.kind === "audioinput"; }).forEach(function (d) {
+        var option = document.createElement("option");
+        option.value = d.deviceId;
+        option.textContent = d.label || ("microphone " + d.deviceId.slice(0, 8));
+        select.appendChild(option);
+      });
+      log("microphone permission granted; " + (select.options.length - 1) + " input device(s) listed");
+    }).catch(function (error) { log("permission error: " + error.name + " " + error.message); });
+  };
+
+  function describeTrack(track, context, rec) {
+    var s = track.getSettings ? track.getSettings() : {};
+    var c = track.getConstraints ? track.getConstraints() : {};
+    var dl = document.getElementById("trackInfo");
+    var rows = [
+      ["Device", track.label || "(unnamed)"],
+      ["Track sample rate", s.sampleRate ? s.sampleRate + " Hz" : "not reported"],
+      ["Channels", s.channelCount || "not reported"],
+      ["Echo cancellation", String(s.echoCancellation) + " (requested " + String(c.echoCancellation) + ")"],
+      ["Noise suppression", String(s.noiseSuppression) + " (requested " + String(c.noiseSuppression) + ")"],
+      ["Auto gain", String(s.autoGainControl) + " (requested " + String(c.autoGainControl) + ")"],
+      ["AudioContext rate", context ? context.sampleRate + " Hz" : "n/a"],
+      ["Recorder MIME", rec ? rec.mimeType : "n/a"],
+      ["Recorder bitrate", rec && rec.audioBitsPerSecond ? rec.audioBitsPerSecond + " bps" : "browser default"],
+      ["Track state", track.readyState + (track.muted ? " (MUTED by the OS/browser)" : "")]
+    ];
+    dl.innerHTML = rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd class='mono'>" + r[1] + "</dd>"; }).join("");
+    return rows;
+  }
+
+  startButton.onclick = function () {
+    chunks = []; lastBlob = null;
+    document.getElementById("captureResult").hidden = true;
+    var audio = selectedConstraints();
+    log("getUserMedia " + JSON.stringify(audio));
+    navigator.mediaDevices.getUserMedia({ audio: audio }).then(function (s) {
+      stream = s;
+      var track = s.getAudioTracks()[0];
+      track.onmute = function () { log("track MUTED by browser/OS"); };
+      track.onunmute = function () { log("track unmuted"); };
+      track.onended = function () { log("track ended"); };
+      var AudioContextType = window.AudioContext || window.webkitAudioContext;
+      meterContext = new AudioContextType();
+      var source = meterContext.createMediaStreamSource(s);
+      var analyser = meterContext.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      meterContext.resume();
+      var mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].filter(function (m) { return MediaRecorder.isTypeSupported(m); })[0] || "";
+      var options = mimeType ? { mimeType: mimeType } : {};
+      var bitrate = Number(document.getElementById("bitrate").value);
+      if (bitrate) options.audioBitsPerSecond = bitrate;
+      recorder = new MediaRecorder(s, options);
+      recorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onerror = function (e) { log("recorder error: " + (e.error ? e.error.name : e)); };
+      recorder.onstart = function () { log("recorder started (" + recorder.mimeType + ")"); };
+      recorder.onstop = function () {
+        var blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
+        lastBlob = blob;
+        var ms = Date.now() - startedAt;
+        log("recorder stopped: " + chunks.length + " chunk(s), " + blob.size + " bytes, " + ms + " ms");
+        s.getTracks().forEach(function (t) { t.stop(); });
+        if (meterContext) { meterContext.close(); meterContext = null; }
+        clearInterval(meterTimer);
+        showCapture(blob);
+      };
+      describeTrack(track, meterContext, recorder);
+      var samples = new Float32Array(analyser.fftSize);
+      meterTimer = setInterval(function () {
+        analyser.getFloatTimeDomainData(samples);
+        var peak = 0, sum = 0;
+        for (var i = 0; i < samples.length; i++) { var a = Math.abs(samples[i]); if (a > peak) peak = a; sum += samples[i] * samples[i]; }
+        var rms = Math.sqrt(sum / samples.length);
+        document.getElementById("live").style.width = Math.min(100, peak * 100) + "%";
+        document.getElementById("liveDb").textContent = "peak " + dbfs(peak) + " dBFS, rms " + dbfs(rms) + " dBFS";
+        document.getElementById("timer").textContent = ((Date.now() - startedAt) / 1000).toFixed(1) + " s";
+      }, 80);
+      startedAt = Date.now();
+      recorder.start(250);
+      startButton.disabled = true; stopButton.disabled = false;
+    }).catch(function (error) {
+      log("capture failed: " + error.name + " " + error.message);
+    });
+  };
+
+  stopButton.onclick = function () {
+    stopButton.disabled = true; startButton.disabled = false;
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+  };
+
+  function showCapture(blob) {
+    var url = URL.createObjectURL(blob);
+    document.getElementById("capturePlayer").src = url;
+    var link = document.getElementById("captureDownload");
+    link.href = url;
+    link.download = "capture-" + new Date().toISOString().replace(/[:.]/g, "-") + (blob.type.indexOf("mp4") >= 0 ? ".mp4" : ".webm");
+    document.getElementById("captureResult").hidden = false;
+    document.getElementById("sttResult").textContent = "";
+    blob.arrayBuffer().then(analyzeBuffer).then(function (m) {
+      drawEnvelope(document.getElementById("captureEnv"), m.envelope);
+      var v = verdictFor(m);
+      var box = document.getElementById("captureVerdict");
+      box.className = "verdict " + v.cls;
+      box.textContent = v.text + " Decoded " + m.sampleRate + " Hz, " + m.channels + " ch, clipping " + m.clippingPercent + "%, silent frames " + m.silentPercent + "%.";
+      log("analysis: " + JSON.stringify({ durationMs: m.durationMs, peakDb: m.peakDb, rmsDb: m.rmsDb, clipping: m.clippingPercent, silent: m.silentPercent, speechBand: m.speechBandRatio }));
+    }).catch(function (error) { log("decode failed: " + error); });
+  }
+
+  document.getElementById("sendStt").onclick = function () {
+    if (!lastBlob) return;
+    document.getElementById("sttResult").textContent = "transcribing…";
+    fetch("/api/transcribe", { method: "POST", headers: { "Content-Type": lastBlob.type, "X-Metabook-Stop-Reason": "diagnostics-page", "X-Metabook-Duration-Ms": String(Date.now() - startedAt) }, body: lastBlob })
+      .then(function (r) { return r.json(); })
+      .then(function (body) { document.getElementById("sttResult").textContent = body.text ? "→ “" + body.text + "”" : "→ (empty transcript) " + (body.error || ""); log("transcript: " + JSON.stringify(body)); refreshList(); })
+      .catch(function (error) { document.getElementById("sttResult").textContent = "failed: " + error; });
+  };
+
+  // ---------------------------------------------------------------- app override
+  var overrideKey = "metabookVoiceCapture";
+  function showOverride() {
+    var raw = localStorage.getItem(overrideKey);
+    document.getElementById("overrideState").textContent = raw ? "App override active: " + raw : "No override: the app uses its defaults.";
+  }
+  document.getElementById("applyOverride").onclick = function () {
+    var audio = selectedConstraints();
+    var payload = {
+      echoCancellation: audio.echoCancellation, noiseSuppression: audio.noiseSuppression, autoGainControl: audio.autoGainControl,
+      deviceId: audio.deviceId ? audio.deviceId.exact : "",
+      audioBitsPerSecond: Number(document.getElementById("bitrate").value) || 0,
+      debugLog: true
+    };
+    localStorage.setItem(overrideKey, JSON.stringify(payload));
+    showOverride();
+    log("app override saved (reload the app tab to apply)");
+  };
+  document.getElementById("clearOverride").onclick = function () { localStorage.removeItem(overrideKey); showOverride(); };
+  showOverride();
+
+  // ---------------------------------------------------------------- saved turns
+  function refreshList() {
+    fetch("/api/voice-debug/list").then(function (r) { return r.json(); }).then(function (body) {
+      var tbody = document.querySelector("#files tbody");
+      tbody.innerHTML = "";
+      (body.files || []).forEach(function (file) {
+        var tr = document.createElement("tr");
+        var meta = file.meta || {};
+        tr.innerHTML = "<td class='mono'>" + file.stamp + "</td>"
+          + "<td class='mono'>" + (meta.stopReason || "?") + " / " + (meta.durationMs || "?") + " ms / " + Math.round(file.size / 1024) + " KB"
+          + (meta.peak ? "<br>app meter: peak " + meta.peak + ", hot " + (meta.clip || "?") : "")
+          + (meta.track ? "<br><span class='muted'>" + meta.track.replace(/[<>]/g, "") + "</span>" : "") + "</td>"
+          + "<td>" + (meta.transcript || "") + "</td>"
+          + "<td class='mono measure'>—</td>"
+          + "<td></td>";
+        var actions = tr.lastElementChild;
+        var play = document.createElement("audio"); play.controls = true; play.src = "/api/voice-debug/file/" + encodeURIComponent(file.name); play.style.height = "30px";
+        var dl = document.createElement("a"); dl.href = play.src; dl.download = file.name; dl.innerHTML = "<button>Download</button>";
+        var analyze = document.createElement("button"); analyze.textContent = "Analyze";
+        var env = document.createElement("canvas"); env.className = "env"; env.width = 900; env.height = 70; env.hidden = true;
+        analyze.onclick = function () {
+          analyze.disabled = true;
+          fetch(play.src).then(function (r) { return r.arrayBuffer(); }).then(analyzeBuffer).then(function (m) {
+            var v = verdictFor(m);
+            tr.querySelector(".measure").innerHTML = "peak " + m.peakDb + " dBFS<br>rms " + m.rmsDb + " dBFS<br>speech band " + m.speechBandRatio + "<br>silent " + m.silentPercent + "%, clip " + m.clippingPercent + "%<br>" + m.durationMs + " ms @ " + m.sampleRate + " Hz"
+              + "<div class='verdict " + v.cls + "'>" + v.text + "</div>";
+            env.hidden = false; drawEnvelope(env, m.envelope);
+            log("analysis " + file.name + ": " + JSON.stringify({ durationMs: m.durationMs, peakDb: m.peakDb, rmsDb: m.rmsDb, clipping: m.clippingPercent, silent: m.silentPercent, speechBand: m.speechBandRatio }));
+          }).catch(function (error) { tr.querySelector(".measure").textContent = "decode failed: " + error; });
+        };
+        actions.appendChild(play); actions.appendChild(document.createElement("br")); actions.appendChild(dl); actions.appendChild(analyze);
+        tbody.appendChild(tr);
+        var envRow = document.createElement("tr"); var envCell = document.createElement("td"); envCell.colSpan = 5; envCell.appendChild(env); envRow.appendChild(envCell); tbody.appendChild(envRow);
+      });
+      log("listed " + (body.files || []).length + " saved recording(s)");
+    }).catch(function (error) { log("list failed: " + error); });
+  }
+  document.getElementById("refresh").onclick = refreshList;
+  refreshList();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "adaptive-learning-tutor-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Protected AI tutor gateway and static WebGL host for the Unity Solar System lesson.",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

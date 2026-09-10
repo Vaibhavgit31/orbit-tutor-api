@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORBIT chatbot bench</title>
+<style>
+  :root {
+    --bg: #0b0b10; --panel: #12141c; --line: #1e293b; --text: #f8fafc;
+    --muted: #94a3b8; --cyan: #38bdf8; --green: #34d399; --amber: #fbbf24; --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex;
+           gap: 14px; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .01em; }
+  .pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line);
+          border-radius: 999px; padding: 3px 10px; }
+  main { max-width: 980px; margin: 0 auto; padding: 18px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input[type=text], select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px; font: inherit; }
+  #q { flex: 1 1 380px; }
+  button { background: var(--cyan); color: #07111f; border: 0; border-radius: 10px;
+           padding: 12px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .answer { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+            padding: 16px 18px; margin-top: 16px; min-height: 90px; white-space: pre-wrap; }
+  .meta { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px;
+          font-size: 13px; color: var(--muted); }
+  .meta b { color: var(--cyan); font-weight: 600; }
+  .actions { margin-top: 10px; font-size: 13px; color: var(--amber); }
+  .log { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  .log div { padding: 4px 0; border-bottom: 1px solid #151922; }
+  .ok { color: var(--green); } .bad { color: var(--red); }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .samples button { background: transparent; border: 1px solid var(--line); color: var(--muted);
+                    font-weight: 400; padding: 7px 12px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ORBIT chatbot bench</h1>
+  <span class="pill" id="health">checking backend…</span>
+  <span class="pill" id="mode"></span>
+</header>
+
+<main>
+  <div class="row">
+    <input type="text" id="q" placeholder="Ask ORBIT anything about the Solar System…"
+           value="Why is Mars red?" autocomplete="off">
+    <select id="selected" title="Pretend this planet is currently selected in the scene">
+      <option value="">no planet selected</option>
+      <option>sun</option><option>mercury</option><option>venus</option><option selected>earth</option>
+      <option>mars</option><option>jupiter</option><option>saturn</option><option>uranus</option><option>neptune</option>
+    </select>
+    <button id="ask">Ask</button>
+    <button id="mic" class="ghost">🎤 Speak</button>
+    <button id="stop" class="ghost" disabled>Stop</button>
+  </div>
+  <div class="hint">Answers stream exactly as they do in the app, using the same prompt, same
+    model and the same routes. Speaking uses the same record-and-transcribe path.</div>
+
+  <div class="row samples" style="margin-top:12px">
+    <button data-q="Tell me about Saturn.">Tell me about Saturn.</button>
+    <button data-q="Take me to Mars and explain it.">Take me to Mars…</button>
+    <button data-q="Which is bigger, Earth or Mars?">Compare two planets</button>
+    <button data-q="Tell me about its moons.">Follow-up: its moons</button>
+    <button data-q="Why do we have seasons?">General science</button>
+  </div>
+
+  <div class="answer" id="answer">The answer appears here, word by word.</div>
+  <div class="meta" id="meta"></div>
+  <div class="actions" id="actions"></div>
+
+  <div class="log" id="log"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const history = [];
+let audio = new Audio();
+
+fetch('/health').then(r => r.json()).then(h => {
+  $('health').textContent = h.aiConfigured ? 'backend ready · ' + h.model : 'NO API KEY — offline only';
+  $('health').className = 'pill ' + (h.aiConfigured ? 'ok' : 'bad');
+  $('mode').textContent = 'voice: ' + h.voiceMode + ' · stt: ' + h.sttModel + ' · tts: ' + h.ttsModel;
+}).catch(() => { $('health').textContent = 'backend unreachable'; $('health').className = 'pill bad'; });
+
+function log(text, cls) {
+  const d = document.createElement('div');
+  d.textContent = new Date().toLocaleTimeString() + '  ' + text;
+  if (cls) d.className = cls;
+  $('log').prepend(d);
+}
+
+function payload(question) {
+  return JSON.stringify({
+    module: 'solar_system', eventType: 'student_message', studentMessage: question,
+    selectedObject: $('selected').value, lessonStep: 0, score: 0, quizId: '',
+    learnedObjects: [], availableObjects: ['sun','mercury','venus','earth','mars','jupiter','saturn','uranus','neptune'],
+    conversationHistory: history.slice(-12)
+  });
+}
+
+async function ask(question) {
+  $('ask').disabled = true;
+  $('answer').textContent = '';
+  $('meta').textContent = '';
+  $('actions').textContent = '';
+  const t0 = performance.now();
+  let firstDelta = 0, text = '';
+  try {
+    const res = await fetch('/api/tutor/stream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload(question)
+    });
+    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, cut); buf = buf.slice(cut + 2);
+        let ev = 'message', data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) ev = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        const parsed = JSON.parse(data);
+        if (ev === 'delta') {
+          if (!firstDelta) { firstDelta = performance.now() - t0; }
+          text += parsed.text; $('answer').textContent = text;
+        } else if (ev === 'done') {
+          const total = performance.now() - t0;
+          const reply = parsed.reply || {};
+          $('answer').textContent = reply.message || text;
+          $('meta').innerHTML = 'first word <b>' + Math.round(firstDelta) + ' ms</b>' +
+            ' · complete <b>' + Math.round(total) + ' ms</b>' +
+            ' · outcome <b>' + (reply.outcome || '-') + '</b>' +
+            ' · server <b>' + (parsed.timing ? parsed.timing.totalMs + ' ms' : '-') + '</b>';
+          $('actions').textContent = (reply.actions && reply.actions.length)
+            ? 'scene actions: ' + reply.actions.map(a => a.type + (a.target ? '(' + a.target + ')' : (a.targets && a.targets.length ? '(' + a.targets.join(',') + ')' : ''))).join('  ')
+            : 'scene actions: none';
+          history.push({ role: 'user', content: question });
+          history.push({ role: 'assistant', content: reply.message || text });
+          speak(reply.message || text);
+          log('answered in ' + Math.round(total) + ' ms', 'ok');
+        } else if (ev === 'error') {
+          throw new Error(parsed.error || 'stream error');
+        }
+      }
+    }
+  } catch (e) {
+    $('answer').textContent = 'Failed: ' + e.message;
+    log('failed: ' + e.message, 'bad');
+  }
+  $('ask').disabled = false;
+}
+
+async function speak(text) {
+  if (!text) return;
+  try {
+    const t = performance.now();
+    const res = await fetch('/api/speech', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    audio.src = URL.createObjectURL(await res.blob());
+    await audio.play();
+    log('voice ready in ' + Math.round(performance.now() - t) + ' ms');
+  } catch (e) { log('voice failed: ' + e.message, 'bad'); }
+}
+
+// ---- microphone: the same record-then-transcribe path the app uses ----
+let recorder = null, chunks = [], recordStart = 0, lastVoiceAt = 0, meter = null;
+
+$('mic').onclick = async () => {
+  if (recorder) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    recorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+    chunks = []; recordStart = performance.now(); lastVoiceAt = performance.now();
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = () => finishRecording(stream);
+    recorder.start(250);
+    $('mic').textContent = '● listening…'; $('stop').disabled = false;
+    // stop after ~700 ms of silence, like the app
+    const ctx = new AudioContext(); const src = ctx.createMediaStreamSource(stream);
+    const an = ctx.createAnalyser(); an.fftSize = 512; src.connect(an);
+    const buf = new Float32Array(an.fftSize); let heard = false;
+    meter = setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0; for (const v of buf) sum += v * v;
+      const rms = Math.sqrt(sum / buf.length);
+      if (rms > 0.02) { heard = true; lastVoiceAt = performance.now(); }
+      if (heard && performance.now() - lastVoiceAt > 700) stopRecording();
+      else if (!heard && performance.now() - recordStart > 8000) stopRecording();
+    }, 100);
+  } catch (e) { log('microphone blocked: ' + e.message, 'bad'); }
+};
+$('stop').onclick = stopRecording;
+
+function stopRecording() {
+  if (meter) { clearInterval(meter); meter = null; }
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+}
+
+async function finishRecording(stream) {
+  const spoke = performance.now();
+  $('mic').textContent = '🎤 Speak'; $('stop').disabled = true;
+  const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+  stream.getTracks().forEach(t => t.stop());
+  recorder = null;
+  if (blob.size < 1500) { log('nothing recorded', 'bad'); return; }
+  try {
+    const res = await fetch('/api/transcribe', {
+      method: 'POST', headers: { 'Content-Type': blob.type }, body: blob
+    });
+    const body = await res.json();
+    const heard = (body.text || '').trim();
+    log('heard "' + heard + '" · transcribed in ' + Math.round(performance.now() - spoke) + ' ms');
+    if (heard) { $('q').value = heard; ask(heard); }
+  } catch (e) { log('transcription failed: ' + e.message, 'bad'); }
+}
+
+$('ask').onclick = () => ask($('q').value.trim());
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask($('q').value.trim()); });
+document.querySelectorAll('.samples button').forEach(b => {
+  b.onclick = () => { $('q').value = b.dataset.q; ask(b.dataset.q); };
+});
+</script>
+</body>
+</html>
