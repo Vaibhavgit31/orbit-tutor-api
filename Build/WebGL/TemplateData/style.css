@@ -1,4 +1,9 @@
-html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden; background: #020712 }
+@font-face { font-family: "Oxanium"; src: url("Fonts/Oxanium-Variable.ttf") format("truetype"); font-weight: 500 600; font-display: swap; }
+@font-face { font-family: "Michroma"; src: url("Fonts/Michroma-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Share Tech Mono"; src: url("Fonts/ShareTechMono-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+:root { --font-ui: "Oxanium", "Segoe UI", sans-serif; --font-display: "Michroma", "Arial Narrow", sans-serif; --font-data: "Share Tech Mono", "Consolas", monospace; }
+html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden; background: #020712; font-family: var(--font-ui); font-weight: 500 }
+button, input, select, textarea { font: inherit }
 #unity-container { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh }
 #unity-canvas-container { position: absolute; inset: 0 }
 #unity-canvas { display: block; width: 100%; height: 100%; background: #231F20 }
@@ -8,9 +13,12 @@ html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden;
 #unity-progress-bar-full { width: 0%; height: 18px; margin-top: 10px; background: url('progress-bar-full-dark.png') no-repeat center }
 #unity-footer { position: fixed; z-index: 20; right: 12px; bottom: 12px; width: auto; line-height: 38px; display: flex; gap: 8px; pointer-events: none }
 #unity-webgl-logo { float:left; width: 204px; height: 38px; background: url('webgl-logo.png') no-repeat center }
-#unity-build-title { float: right; margin-right: 10px; line-height: 38px; font-family: arial; font-size: 18px }
-#unity-fullscreen-button { cursor: pointer; min-width: 112px; height: 38px; padding: 0 14px; border: 1px solid #43d9ff; border-radius: 6px; color: #eafaff; background: rgba(5, 18, 35, 0.88); font: 700 12px Arial, sans-serif; pointer-events: auto }
-#unity-webxr-link { float: left; margin-right: 10px; line-height: 38px; font-family: arial; font-size: 18px }
+#unity-build-title { float: right; margin-right: 10px; line-height: 38px; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase }
+#unity-fullscreen-button { cursor: pointer; min-width: 112px; height: 38px; padding: 0 14px; border: 1px solid #43d9ff; border-radius: 6px; color: #eafaff; background: rgba(5, 18, 35, 0.88); font: 600 12px var(--font-ui); letter-spacing: .08em; text-transform: uppercase; pointer-events: auto }
+#unity-webxr-link { float: left; margin-right: 10px; line-height: 38px; font-family: var(--font-ui); font-weight: 600; font-size: 13px; letter-spacing: .08em; text-transform: uppercase }
+.start-brand { font-family: var(--font-ui); font-size: 22px; font-weight: 600; letter-spacing: .14em; color: #38bdf8; margin-bottom: 8px; text-transform: uppercase }
+.start-title { font-family: var(--font-display); font-size: 22px; letter-spacing: .12em; margin-bottom: 28px; text-transform: uppercase }
+.start-cta { display: inline-block; padding: 15px 42px; background: #38bdf8; color: #020712; font: 600 18px var(--font-ui); border-radius: 50px; letter-spacing: .12em; box-shadow: 0 0 30px rgba(56,189,248,.5); text-transform: uppercase }
 #entervr, #enterar { width: 44px; height: 38px; border: 0; border-radius: 6px; pointer-events: auto }
 #entervr:enabled, #enterar:enabled { color: #00131c; background-color: #43d9ff; cursor: pointer }
 #entervr:disabled, #enterar:disabled { color: #78838a; background-color: rgba(55, 64, 70, 0.75) }
