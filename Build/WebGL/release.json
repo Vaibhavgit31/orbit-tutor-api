@@ -1,0 +1,26 @@
+{
+  "artifacts": [
+    {
+      "bytes": 83751244,
+      "sha256": "7c67a872242b0ec34318ddbc5804406205e1417ed55d23c213a3f7f15c5487ab",
+      "path": "Build/WebGL.data.unityweb"
+    },
+    {
+      "bytes": 96993,
+      "sha256": "4d7d1f1a16377d3cc4f5b2fc6a11ba7c05d074751b5dc392ce57ffbc807e7b92",
+      "path": "Build/WebGL.framework.js.unityweb"
+    },
+    {
+      "bytes": 114374,
+      "sha256": "19758841e102daeb8b277ef49953e6e803e95ecc233e27d0dadb73ff6ad4d41f",
+      "path": "Build/WebGL.loader.js"
+    },
+    {
+      "bytes": 6987530,
+      "sha256": "1bdf4ebec068b65049216bd7fb33617ce0343649698f98223709ebe4b328983c",
+      "path": "Build/WebGL.wasm.unityweb"
+    }
+  ],
+  "builtAtUtc": "2026-09-14T06:50:03.1642003Z",
+  "sourceRevision": "da3fa7e9309d0ce090b40e7e4bff0845d15b0a1b"
+}
