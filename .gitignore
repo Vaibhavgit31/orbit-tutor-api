@@ -1,2 +1,5 @@
 .env
 node_modules/
+
+/Build/WebGL/Build/WebGL.data.unityweb
+/Build/WebGL/Build/*.assembling

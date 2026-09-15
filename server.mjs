@@ -1,3 +1,4 @@
+import './prepare-webgl.mjs';
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
