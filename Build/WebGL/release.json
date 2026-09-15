@@ -1,26 +1,26 @@
 {
-  "builtAtUtc": "2026-09-15T05:09:49.9994564Z",
-  "sourceRevision": "90d55da74961b02ee959bfab0c91423e5220dbfd",
+  "sourceRevision": "9baaad87a83c25b94978f776e8f07c757076621a",
+  "builtAtUtc": "2026-09-15T06:46:31.6934286Z",
   "artifacts": [
     {
-      "bytes": 84433277,
-      "sha256": "10e9760be0f8ef714197ef08f0c7b3bb2ad7ad08ca2cf1692d3d778cfcafecb9",
-      "path": "Build/WebGL.data.unityweb"
+      "sha256": "1fa142e857ec8d77a8a6eb464ff211375720223a29293765b13307fa32091aac",
+      "path": "Build/WebGL.data.unityweb",
+      "bytes": 84383329
     },
     {
-      "bytes": 96932,
-      "sha256": "5f15f764162ad5a7ba926e2245d960e5ecb3a0957898e2c41d216f68cbeb3bf2",
-      "path": "Build/WebGL.framework.js.unityweb"
+      "sha256": "53f0fc262740a84c52decd803a6dfb566846893b14b286827825400e2155dc2f",
+      "path": "Build/WebGL.framework.js.unityweb",
+      "bytes": 96988
     },
     {
-      "bytes": 114374,
       "sha256": "19758841e102daeb8b277ef49953e6e803e95ecc233e27d0dadb73ff6ad4d41f",
-      "path": "Build/WebGL.loader.js"
+      "path": "Build/WebGL.loader.js",
+      "bytes": 114374
     },
     {
-      "bytes": 6987725,
-      "sha256": "d5ace90bc61aa9776373b48352cebfb16512cb5535c43bd3c8dd2598f36f2c0e",
-      "path": "Build/WebGL.wasm.unityweb"
+      "sha256": "5f8f0e1a3e81bb13da4de17b81464b011b0c4c42095a00788d70adb283b46b9e",
+      "path": "Build/WebGL.wasm.unityweb",
+      "bytes": 6971782
     }
   ]
 }
