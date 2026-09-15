@@ -1,7 +1,7 @@
 {
   "file": "WebGL.data.unityweb",
-  "bytes": 79105251,
-  "sha256": "1b85b6e9b92f66814237ee3457abcfaf533d6f45c897550e57b53677637b31ff",
+  "bytes": 81707626,
+  "sha256": "2a60b6e3cc45ad270f32a19371dfa7e3401cb52149bcce0524a2b4b000cd8d7f",
   "parts": [
     "WebGL.data.unityweb.part00",
     "WebGL.data.unityweb.part01"

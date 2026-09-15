@@ -294,6 +294,9 @@ const accessSession = createHash("sha256").update("metabook-session:" + accessCo
 function isAuthorised(request, requestUrl) {
   if (!accessCode) return true;
   if (requestUrl.searchParams.get("code") === accessCode) return true;
+  // A player hosted on another site (GitHub Pages) cannot receive this
+  // server's cookie, so it sends the code it was given as a header instead.
+  if (String(request.headers["x-access-code"] || "") === accessCode) return true;
   const cookies = String(request.headers.cookie || "");
   return cookies.split(";").some(part => part.trim() === accessCookie + "=" + accessSession);
 }
@@ -351,6 +354,13 @@ const server = createServer(async (request, response) => {
   }
   console.log(`[HTTP] ${request.method} ${requestUrl.pathname}`);
 
+  // Lets a cross-site player check the access code it holds; the gate above
+  // already answered 401 when the code was missing or wrong.
+  if (request.method === "GET" && requestUrl.pathname === "/api/access") {
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
   if (request.method === "GET" && requestUrl.pathname === "/health") {
     sendJson(response, 200, {
       ok: true,
@@ -377,6 +387,11 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && requestUrl.pathname === "/api/tutor") {
     await handleTutorRequest(request, response);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/report") {
+    await handleReportRequest(request, response);
     return;
   }
 
@@ -723,6 +738,110 @@ async function handleTutorRequest(request, response) {
   } catch (error) {
     console.error("Tutor request error", error);
     sendJson(response, 502, { error: "AI tutor is temporarily unavailable." });
+  }
+}
+
+// ------------------------------------------------------------- session report
+// The teacher's PDF asks for an assessment of the whole session: which topics
+// the learner covered, a score out of 10, what they understood, where they
+// should learn more and what to ask next time. Solaris writes it from the
+// session record (worlds, questions and answers, landing quiz attempts).
+const reportSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "scoreOutOfTen", "topicsCovered", "strengths", "needsWork", "nextQuestions"],
+  properties: {
+    summary: { type: "string" },
+    scoreOutOfTen: { type: "integer" },
+    topicsCovered: { type: "array", items: { type: "string" } },
+    strengths: { type: "array", items: { type: "string" } },
+    needsWork: { type: "array", items: { type: "string" } },
+    nextQuestions: { type: "array", items: { type: "string" } },
+  },
+};
+
+const reportInstructions = [
+  "You are Solaris, an AI Solar System tutor, writing a short assessment of one learner's session for their teacher.",
+  "You receive the session record as JSON: worlds visited, the questions the learner asked with your answers, and the landing quiz (each question, the learner's answers, attempts, and the correct answer).",
+  "Write for a teacher of 10 to 14 year olds. Be specific and kind; never invent things the learner did not do.",
+  "summary: two or three sentences on what the learner did and how they engaged.",
+  "scoreOutOfTen: an integer 0-10 for understanding shown. Weigh quiz accuracy (first-attempt correct answers count most), the depth of the questions they asked, and how many worlds they explored. A session with no quiz and no questions scores at most 3.",
+  "topicsCovered: 3-8 short topic labels actually touched in the session (for example 'Mars: iron oxide and the red colour').",
+  "strengths: 2-4 points the learner understood, each tied to evidence from the session.",
+  "needsWork: 2-4 points to learn more about, starting with any quiz question answered wrongly, then gaps in what they asked.",
+  "nextQuestions: 3-5 concrete questions the learner could ask Solaris next time, phrased in the learner's own voice.",
+].join(" ");
+
+async function handleReportRequest(request, response) {
+  if (!apiKey) {
+    sendJson(response, 503, { error: "AI tutor is not configured on this server." });
+    return;
+  }
+  let session;
+  try {
+    session = JSON.parse(await readRequestBody(request, 64_000));
+    if (!session || typeof session !== "object") throw new Error("Session record must be a JSON object.");
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  // Only the fields the assessment needs, trimmed so a long chat cannot blow the prompt.
+  const record = {
+    durationSeconds: Number(session.durationSeconds) || 0,
+    worldsVisited: Array.isArray(session.worldsVisited) ? session.worldsVisited.slice(0, 12) : [],
+    questions: (Array.isArray(session.questions) ? session.questions : []).slice(0, 30).map((entry) => ({
+      question: String(entry?.question || "").slice(0, 300),
+      answer: String(entry?.answer || "").slice(0, 400),
+    })),
+    quiz: (Array.isArray(session.quiz) ? session.quiz : []).slice(0, 40).map((entry) => ({
+      prompt: String(entry?.prompt || "").slice(0, 300),
+      learnerAnswers: String(entry?.learnerAnswers || "").slice(0, 300),
+      correctAnswer: String(entry?.correctAnswer || "").slice(0, 200),
+      correct: Boolean(entry?.correct),
+      attempts: Number(entry?.attempts) || 0,
+    })),
+    level: String(session.level || ""),
+    masteryPercent: Number(session.masteryPercent) || 0,
+  };
+  try {
+    const isReasoningModel = model.includes("5.") || model.includes("o1") || model.includes("o3");
+    const textConfig = {
+      format: { type: "json_schema", name: "solar_system_session_report", strict: true, schema: reportSchema },
+    };
+    if (isReasoningModel) textConfig.verbosity = "low";
+    const payload = {
+      model,
+      instructions: reportInstructions,
+      input: JSON.stringify(record),
+      store: false,
+      max_output_tokens: 900,
+      text: textConfig,
+    };
+    if (isReasoningModel && reasoningEffort) payload.reasoning = { effort: reasoningEffort };
+    const upstream = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const upstreamBody = await upstream.json();
+    if (!upstream.ok) {
+      console.error("OpenAI report request failed", upstream.status, upstreamBody?.error?.message || "");
+      sendJson(response, 502, { error: "The report assessment is temporarily unavailable." });
+      return;
+    }
+    const analysis = JSON.parse(extractOutputText(upstreamBody));
+    const clampList = (value, limit) => (Array.isArray(value) ? value : []).map((item) => String(item).slice(0, 240)).slice(0, limit);
+    sendJson(response, 200, {
+      summary: String(analysis.summary || "").slice(0, 900),
+      scoreOutOfTen: Math.max(0, Math.min(10, Math.round(Number(analysis.scoreOutOfTen) || 0))),
+      topicsCovered: clampList(analysis.topicsCovered, 8),
+      strengths: clampList(analysis.strengths, 4),
+      needsWork: clampList(analysis.needsWork, 4),
+      nextQuestions: clampList(analysis.nextQuestions, 5),
+    });
+  } catch (error) {
+    console.error("Report request error", error);
+    sendJson(response, 502, { error: "The report assessment is temporarily unavailable." });
   }
 }
 
@@ -1281,6 +1400,13 @@ async function serveStaticFile(pathname, request, response) {
     // so every .unityweb file is a Brotli stream. Declaring that lets the
     // browser inflate it natively instead of the loader's slower JavaScript path.
     const unityWebEncoding = candidate.endsWith(".unityweb") ? "br" : "";
+    // index.html stamps every player file with ?v=<build time>, so a stamped
+    // player file can be cached by the browser for a year: a new build gets a
+    // new stamp and is fetched fresh. Without this every reload re-downloaded
+    // the whole 84 MB player, which is what burned through Render's bandwidth
+    // allowance. index.html itself (which carries the stamp) and everything
+    // unstamped stay no-store.
+    const versionedPlayerFile = /^Build\//.test(relativePath) && /[?&]v=/.test(String(request.url || ""));
     const encodedContentType = candidate.endsWith(".framework.js.unityweb")
       ? "text/javascript; charset=utf-8"
       : candidate.endsWith(".wasm.unityweb")
@@ -1294,9 +1420,9 @@ async function serveStaticFile(pathname, request, response) {
       "Accept-Ranges": "bytes",
       "Content-Length": end - start + 1,
       ...(status === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileInfo.size}` } : {}),
-      // This server is for local iteration. A no-store policy prevents Unity's
-      // same-named WebGL artifacts from surviving across rebuilds in the browser.
-      "Cache-Control": "no-store",
+      // Unstamped files stay no-store so same-named artifacts never survive a
+      // rebuild; stamped player files are immutable for a year (see above).
+      "Cache-Control": versionedPlayerFile ? "private, max-age=31536000, immutable" : "no-store",
     });
     if (request.method === "HEAD") {
       response.end();
@@ -1335,7 +1461,7 @@ function setCorsHeaders(response) {
   // by the browser jslib alongside each transcription request for voice diagnostics.
   response.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, X-Metabook-Stop-Reason, X-Metabook-Duration-Ms, " +
+    "Content-Type, X-Access-Code, X-Metabook-Stop-Reason, X-Metabook-Duration-Ms, " +
     "X-Metabook-Noise-Floor, X-Metabook-Peak-Db, X-Metabook-Clip-Percent, " +
     "X-Metabook-Track, X-Metabook-Recorder"
   );
