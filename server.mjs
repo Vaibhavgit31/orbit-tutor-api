@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { createReadStream, readFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +71,49 @@ const configuredWebRoot = process.env.WEBGL_ROOT;
 const defaultWebRoot = fileURLToPath(new URL("../Build/WebGL/", import.meta.url));
 const webRoot = resolve(configuredWebRoot || defaultWebRoot);
 const corsOrigin = process.env.CORS_ORIGIN || "*";
+
+// The Unity data file is too large for the deploy repository, so it is committed
+// as numbered parts plus a manifest (Build/data-parts.json) and the whole file is
+// gitignored. The host therefore starts without WebGL.data.unityweb, the loader
+// gets a 404 for it, and the page sits at 90% forever. Rebuild the file here,
+// before the first request, so it exists however the service was started.
+// A checksum mismatch is fatal on purpose: a half-built data file would fail
+// later and less clearly than a refusal to start.
+function assembleSplitWebGlData() {
+  const buildDir = join(webRoot, "Build");
+  const manifestPath = join(buildDir, "data-parts.json");
+  if (!existsSync(manifestPath)) return;
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const target = join(buildDir, manifest.file);
+  if (existsSync(target) && statSync(target).size === manifest.bytes) {
+    console.log(`WebGL data already assembled: ${manifest.file} (${manifest.bytes} bytes).`);
+    return;
+  }
+
+  const temp = target + ".assembling";
+  const hash = createHash("sha256");
+  let bytes = 0;
+  const handle = openSync(temp, "w");
+  try {
+    for (const partName of manifest.parts) {
+      const part = readFileSync(join(buildDir, partName));
+      hash.update(part);
+      bytes += part.length;
+      let offset = 0;
+      while (offset < part.length) offset += writeSync(handle, part, offset, part.length - offset);
+    }
+  } finally {
+    closeSync(handle);
+  }
+
+  if (bytes !== manifest.bytes || hash.digest("hex") !== manifest.sha256) {
+    unlinkSync(temp);
+    throw new Error(`WebGL data parts do not match ${manifestPath}: rebuild and publish again.`);
+  }
+  renameSync(temp, target);
+  console.log(`WebGL data assembled from ${manifest.parts.length} parts and verified: ${manifest.file} (${bytes} bytes).`);
+}
 
 const allowedObjects = [
   "sun",
@@ -384,6 +427,8 @@ const server = createServer(async (request, response) => {
     else response.end();
   }
 });
+
+assembleSplitWebGlData();
 
 server.listen(port, () => {
   console.log(`Tutor gateway listening on http://localhost:${port}`);
@@ -1232,6 +1277,9 @@ async function serveStaticFile(pathname, request, response) {
       end = Math.min(end, fileInfo.size - 1);
       status = 206;
     }
+    // The player is built with Brotli compression and decompression fallback,
+    // so every .unityweb file is a Brotli stream. Declaring that lets the
+    // browser inflate it natively instead of the loader's slower JavaScript path.
     const unityWebEncoding = candidate.endsWith(".unityweb") ? "br" : "";
     const encodedContentType = candidate.endsWith(".framework.js.unityweb")
       ? "text/javascript; charset=utf-8"
