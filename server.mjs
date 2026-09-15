@@ -1232,10 +1232,17 @@ async function serveStaticFile(pathname, request, response) {
       end = Math.min(end, fileInfo.size - 1);
       status = 206;
     }
+    const unityWebEncoding = candidate.endsWith(".unityweb") ? "br" : "";
+    const encodedContentType = candidate.endsWith(".framework.js.unityweb")
+      ? "text/javascript; charset=utf-8"
+      : candidate.endsWith(".wasm.unityweb")
+        ? "application/wasm"
+        : contentType(candidate.replace(/\.(br|gz)$/, ""));
     response.writeHead(status, {
-      "Content-Type": contentType(candidate.replace(/\.(br|gz)$/, "")),
-      ...(candidate.endsWith(".br") ? { "Content-Encoding": "br" } : {}),
-      ...(candidate.endsWith(".gz") ? { "Content-Encoding": "gzip" } : {}),
+      "Content-Type": encodedContentType,
+      ...(unityWebEncoding ? { "Content-Encoding": unityWebEncoding } : {}),
+      ...(!unityWebEncoding && candidate.endsWith(".br") ? { "Content-Encoding": "br" } : {}),
+      ...(!unityWebEncoding && candidate.endsWith(".gz") ? { "Content-Encoding": "gzip" } : {}),
       "Accept-Ranges": "bytes",
       "Content-Length": end - start + 1,
       ...(status === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileInfo.size}` } : {}),
