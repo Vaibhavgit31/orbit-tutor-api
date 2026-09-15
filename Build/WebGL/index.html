@@ -26,6 +26,7 @@
       </div>
       <div id="unity-loading-bar">
         <div id="unity-logo"></div>
+        <div id="unity-loading-status">Preparing your journey…</div>
         <div id="unity-progress-bar-empty">
           <div id="unity-progress-bar-full"></div>
         </div>
@@ -50,7 +51,9 @@
         productName: "AI Powered Adaptive Learning",
         productVersion: "0.1.0",
         autoSyncPersistentDataPath: true,
-        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.25),
+        devicePixelRatio: /Android|iPad|Tablet/i.test(navigator.userAgent)
+          ? Math.min(window.devicePixelRatio || 1, 1)
+          : Math.min(window.devicePixelRatio || 1, 1.25),
       };
 
       var container = document.querySelector("#unity-container");
@@ -58,6 +61,7 @@
       var canvasContainer = document.querySelector("#unity-canvas-container");
       var loadingBar = document.querySelector("#unity-loading-bar");
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var loadingStatus = document.querySelector("#unity-loading-status");
       var fullscreenButton = document.querySelector("#unity-fullscreen-button");
       var unityInstance = null;
 
@@ -100,6 +104,7 @@
       script.onload = () => {
         createUnityInstance(canvas, config, (progress) => {
           progressBarFull.style.width = 100 * progress + "%";
+          if (loadingStatus) loadingStatus.textContent = "Loading Solar System · " + Math.round(progress * 100) + "%";
         }).then((instance) => {
           unityInstance = instance;
           loadingBar.style.display = "none";
@@ -111,8 +116,13 @@
             };
           }
         }).catch((message) => {
-          alert(message);
+          loadingBar.classList.add("failed");
+          if (loadingStatus) loadingStatus.textContent = "Unable to start on this device. Close other tabs, reload, and use current Chrome or Edge. " + message;
         });
+      };
+      script.onerror = () => {
+        loadingBar.classList.add("failed");
+        if (loadingStatus) loadingStatus.textContent = "The application loader could not be downloaded. Check your connection and reload.";
       };
       document.body.appendChild(script);
 

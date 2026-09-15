@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1217,17 +1217,39 @@ async function serveStaticFile(pathname, request, response) {
     if (!fileInfo.isFile()) {
       throw new Error("Not a file");
     }
-    const body = request.method === "HEAD" ? null : await readFile(candidate);
-    response.writeHead(200, {
+    let start = 0;
+    let end = fileInfo.size - 1;
+    let status = 200;
+    const range = String(request.headers.range || "").match(/^bytes=(\d*)-(\d*)$/);
+    if (range) {
+      start = range[1] ? Number(range[1]) : 0;
+      end = range[2] ? Number(range[2]) : end;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= fileInfo.size) {
+        response.writeHead(416, { "Content-Range": `bytes */${fileInfo.size}` });
+        response.end();
+        return;
+      }
+      end = Math.min(end, fileInfo.size - 1);
+      status = 206;
+    }
+    response.writeHead(status, {
       "Content-Type": contentType(candidate.replace(/\.(br|gz)$/, "")),
       ...(candidate.endsWith(".br") ? { "Content-Encoding": "br" } : {}),
       ...(candidate.endsWith(".gz") ? { "Content-Encoding": "gzip" } : {}),
-      "Content-Length": fileInfo.size,
+      "Accept-Ranges": "bytes",
+      "Content-Length": end - start + 1,
+      ...(status === 206 ? { "Content-Range": `bytes ${start}-${end}/${fileInfo.size}` } : {}),
       // This server is for local iteration. A no-store policy prevents Unity's
       // same-named WebGL artifacts from surviving across rebuilds in the browser.
       "Cache-Control": "no-store",
     });
-    response.end(body);
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+    const stream = createReadStream(candidate, { start, end });
+    stream.on("error", (streamError) => response.destroy(streamError));
+    stream.pipe(response);
   } catch (err) {
     console.warn(`[static 404] ${pathname} -> ${candidate} (${err?.message || err})`);
     sendJson(response, 404, {
