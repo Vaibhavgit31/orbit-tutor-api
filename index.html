@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | AI Powered Adaptive Learning</title>
+    <meta name="description" content="AI-powered adaptive solar-system learning experience with voice interaction and WebXR support.">
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <!-- Lays out the learner's session report as a PDF (Plugins/WebGL/SessionReport.jslib). -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+    <style>
+      /* Critical layout is inline so a browser cannot reuse the fixed-size CSS
+         from an older WebXR build after Unity replaces files with the same names. */
+      html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden; background: #020712; }
+      #unity-container { position: fixed; inset: 0; left: 0; top: 0; width: 100vw; height: 100vh; height: 100dvh; transform: none; }
+      #unity-canvas-container { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+      #unity-canvas { display: block; width: 100% !important; height: 100% !important; }
+      #unity-footer { position: fixed; z-index: 20; right: 12px; bottom: 12px; width: auto; display: flex; gap: 8px; pointer-events: none; }
+      #unity-fullscreen-button { pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="unity-container">
+      <div id="unity-canvas-container" style="width: 100%; height: 100%;">
+        <canvas id="unity-canvas" style="width: 100%; height: 100%;"></canvas>
+      </div>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-loading-status">Preparing your journey…</div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-footer">
+        <button id="unity-fullscreen-button" type="button" aria-label="Enter fullscreen">FULLSCREEN</button>
+      </div>
+    </div>
+    <script src="TemplateData/data-parts.js"></script>
+    <script src="TemplateData/direct-mode.js"></script>
+    <script>
+      // Where the tutor API lives. Empty means the same origin (the Render
+      // service or a local node serves both page and API). The GitHub Pages
+      // publisher (Tools/Deploy/publish-pages.sh) writes the API address here,
+      // and the page then sends the access code as a header instead of the
+      // same-site cookie the server sets for its own pages.
+      window.metabookApiBase = "";
+      // Direct mode (set by the publisher): no server, the browser's own
+      // service worker answers the tutor API with the visitor's OpenAI key.
+      window.metabookDirectMode = true;
+      window.metabookApi = function (path) { return (window.metabookApiBase || "") + path; };
+      window.metabookApiHeaders = function (headers) {
+        headers = headers || {};
+        if (window.metabookApiBase && window.metabookAccessCode) headers["X-Access-Code"] = window.metabookAccessCode;
+        return headers;
+      };
+      (function rememberAccessCode() {
+        window.metabookAccessCode = "";
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var code = params.get("code");
+          if (code) {
+            localStorage.setItem("metabookAccessCode", code);
+            params.delete("code");
+            var rest = params.toString();
+            history.replaceState(null, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+          }
+          window.metabookAccessCode = localStorage.getItem("metabookAccessCode") || "";
+        } catch (e) {}
+      })();
+      var buildUrl = "Build";
+      var buildVersion = new URLSearchParams(window.location.search).get("build") || "20260922-1424";
+      var assetVersion = "?v=" + encodeURIComponent(buildVersion);
+      var loaderUrl = buildUrl + "/WebGL.loader.js" + assetVersion;
+      var config = {
+        dataUrl: buildUrl + "/WebGL.data.unityweb" + assetVersion,
+        frameworkUrl: buildUrl + "/WebGL.framework.js.unityweb" + assetVersion,
+        codeUrl: buildUrl + "/WebGL.wasm.unityweb" + assetVersion,
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "AI Powered Adaptive Learning",
+        productVersion: "0.1.0",
+        autoSyncPersistentDataPath: true,
+        // Render at CSS pixels everywhere: the bloom pyramid and HDR target make
+        // every extra pixel expensive, and iPadOS reports itself as a Mac.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1),
+      };
+
+      var container = document.querySelector("#unity-container");
+      var canvas = document.querySelector("#unity-canvas");
+      var canvasContainer = document.querySelector("#unity-canvas-container");
+      var loadingBar = document.querySelector("#unity-loading-bar");
+      var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var loadingStatus = document.querySelector("#unity-loading-status");
+      var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+      var unityInstance = null;
+
+      // On a static host the API is elsewhere and cannot show its own code
+      // prompt, so the page asks once and keeps the code in localStorage.
+      function showAccessPrompt(onReady) {
+        if (!window.metabookApiBase || window.metabookAccessCode) { onReady(); return; }
+        var gate = document.createElement("div");
+        gate.id = "access-gate";
+        gate.style.cssText = "position:fixed;inset:0;background:rgba(2,7,18,0.92);display:flex;align-items:center;justify-content:center;z-index:1000;";
+        gate.innerHTML = '<form style="background:#101B26;border:1px solid rgba(180,228,218,0.25);border-radius:16px;padding:28px;width:min(92vw,380px);text-align:center;color:#EDF3F7;font:16px/1.6 system-ui,sans-serif">' +
+          '<div style="font-size:18px;font-weight:600;margin-bottom:6px">AI Solar System</div>' +
+          '<div style="color:#95A8B9;font-size:14px;margin-bottom:18px">Enter the access code to open this build.</div>' +
+          '<input name="code" type="password" autocomplete="off" placeholder="Access code" style="width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid rgba(180,228,218,0.3);background:#020712;color:#EDF3F7;font:inherit">' +
+          '<button type="submit" style="width:100%;margin-top:12px;padding:12px;border:0;border-radius:10px;background:#B4E4DA;color:#071A1E;font:inherit;font-weight:600">Enter</button>' +
+          '<div class="bad" style="color:#f87171;font-size:13px;margin-top:10px;min-height:1.4em"></div></form>';
+        var form = gate.querySelector("form");
+        var input = gate.querySelector("input");
+        var note = gate.querySelector(".bad");
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          var code = (input.value || "").trim();
+          if (!code) return;
+          note.textContent = "Checking...";
+          fetch(window.metabookApi("/api/access"), { headers: { "X-Access-Code": code } }).then(function (response) {
+            if (response.status === 401 || response.status === 403) { note.textContent = "That code is not right."; return; }
+            accept(code);
+          }).catch(function () {
+            // The API may be asleep; keep the code and let the tutor report later.
+            accept(code);
+          });
+        });
+        function accept(code) {
+          window.metabookAccessCode = code;
+          try { localStorage.setItem("metabookAccessCode", code); } catch (e) {}
+          gate.remove();
+          onReady();
+        }
+        document.body.appendChild(gate);
+        try { input.focus(); } catch (e) {}
+      }
+
+      function showStartOverlay() {
+        var overlay = document.createElement("div");
+        overlay.id = "start-overlay";
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(2,7,18,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999;cursor:pointer;-webkit-tap-highlight-color:transparent;";
+        overlay.innerHTML = '<div style="text-align:center;color:#fff;pointer-events:none;padding:20px;">' +
+          '<div class="start-brand">METABOOK AI</div>' +
+          '<div class="start-title">INTERACTIVE SOLAR SYSTEM</div>' +
+          '<div class="start-cta">' +
+          'TAP TO ENTER' +
+          '</div></div>';
+        function onStart() {
+          overlay.remove();
+          if (typeof WEBAudio !== 'undefined' && WEBAudio.audioContext && WEBAudio.audioContext.state === 'suspended') {
+            WEBAudio.audioContext.resume();
+          }
+          if (unityInstance) {
+            try {
+              unityInstance.SendMessage("Timeline", "OnUserStartExperience");
+            } catch(e) {}
+            try {
+              unityInstance.SendMessage("Intro2", "OnUserStartExperience");
+            } catch(e) {}
+          }
+          // Warm the opening narration during the cinematic so the voice starts
+          // together with the captions instead of two or three seconds later.
+          // These strings must match the prelude and invitation lines in
+          // SolarSystemTutorController; the voice plug-in reuses the audio.
+          try {
+            window.metabookSpeechPrefetch = window.metabookSpeechPrefetch || {};
+            [
+              "Countless stars stretch across the darkness. This is the Milky Way, our home galaxy. Somewhere within it lies a small region we call home. Our Solar System.",
+              "I'm Solaris, your AI exploration guide. I can explain each world, focus the view, guide you to planets, and help you test what you discover."
+            ].forEach(function (text) {
+              window.metabookSpeechPrefetch[text] = fetch(window.metabookApi("/api/speech"), {
+                method: "POST",
+                headers: window.metabookApiHeaders({ "Content-Type": "application/json" }),
+                body: JSON.stringify({ text: text })
+              }).then(function (response) {
+                if (!response.ok) throw new Error("speech " + response.status);
+                return response.blob();
+              });
+              window.metabookSpeechPrefetch[text].catch(function () {});
+            });
+          } catch(e) {}
+          if (canvas) {
+            try { canvas.focus(); } catch(e) {}
+          }
+        }
+        overlay.addEventListener("click", onStart, { once: true });
+        overlay.addEventListener("touchend", onStart, { once: true });
+        document.body.appendChild(overlay);
+      }
+
+      loadingBar.style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        // The data file may be published in parts (TemplateData/data-parts.js);
+        // in direct mode the in-browser tutor is set up (and its key asked for)
+        // before the player starts, so the first health check already sees it.
+        metabookLoadDataParts(config, buildUrl, assetVersion, loadingStatus, progressBarFull)
+          .then(() => (window.metabookDirectMode ? metabookDirectSetup(loadingStatus) : undefined))
+          .then(() => createUnityInstance(canvas, config, (progress) => {
+          progressBarFull.style.width = 100 * progress + "%";
+          if (loadingStatus) loadingStatus.textContent = "Loading Solar System · " + Math.round(progress * 100) + "%";
+        })).then((instance) => {
+          unityInstance = instance;
+          loadingBar.style.display = "none";
+          showAccessPrompt(showStartOverlay);
+          if (fullscreenButton)
+          {
+            fullscreenButton.onclick = () => {
+              unityInstance.SetFullscreen(1);
+            };
+          }
+        }).catch((message) => {
+          loadingBar.classList.add("failed");
+          if (loadingStatus) loadingStatus.textContent = "Unable to start on this device. Close other tabs, reload, and use current Chrome or Edge. " + message;
+        });
+      };
+      script.onerror = () => {
+        loadingBar.classList.add("failed");
+        if (loadingStatus) loadingStatus.textContent = "The application loader could not be downloaded. Check your connection and reload.";
+      };
+      document.body.appendChild(script);
+      // The VR and AR entry buttons were retired from the page: the WebXR
+      // package still initialises without them, and only Fullscreen remains.
+    </script>
+  </body>
+</html>

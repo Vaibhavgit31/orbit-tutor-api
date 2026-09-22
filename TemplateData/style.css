@@ -1,0 +1,26 @@
+@font-face { font-family: "Oxanium"; src: url("Fonts/Oxanium-Variable.ttf") format("truetype"); font-weight: 500 700; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("Fonts/Lato-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("Fonts/Lato-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Share Tech Mono"; src: url("Fonts/ShareTechMono-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+/* Glass HUD (Docs/DESIGN-PALETTE.md): mint on deep navy, glass surfaces, cyan for Solaris. */
+:root { --font-ui: "Lato", "Segoe UI", sans-serif; --font-display: "Oxanium", "Segoe UI", sans-serif; --font-data: "Share Tech Mono", "Consolas", monospace;
+  --space: #020712; --glass: rgba(9, 16, 26, 0.72); --hairline: rgba(180, 228, 218, 0.22); --ink: #EDF3F7; --muted: #95A8B9; --mint: #B4E4DA; --mint-light: #CDF2E9; --on-mint: #071A1E; --solaris: #38D2FF; }
+html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden; background: var(--space); font-family: var(--font-ui); font-weight: 400 }
+button, input, select, textarea { font: inherit }
+#unity-container { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh }
+#unity-canvas-container { position: absolute; inset: 0 }
+#unity-canvas { display: block; width: 100%; height: 100%; background: #231F20 }
+#unity-loading-bar { position: absolute; left: 50%; top: 50%; width: min(86vw, 360px); transform: translate(-50%, -50%); display: none; text-align: center; color: var(--ink) }
+#unity-logo { width: 154px; height: 130px; background: url('unity-logo-dark.png') no-repeat center }
+#unity-loading-status { margin: 14px auto 10px; font: 700 12px/1.5 var(--font-ui); letter-spacing: .14em; text-transform: uppercase; color: var(--mint) }
+#unity-loading-bar.failed #unity-loading-status { color: #fca5a5; font-size: 13px; text-transform: none; letter-spacing: 0 }
+#unity-progress-bar-empty { width: 141px; height: 18px; margin: 10px auto 0; background: url('progress-bar-empty-dark.png') no-repeat center }
+#unity-progress-bar-full { width: 0%; height: 18px; margin-top: 10px; background: url('progress-bar-full-dark.png') no-repeat center }
+#unity-footer { position: fixed; z-index: 20; right: 12px; bottom: 12px; width: auto; line-height: 38px; display: flex; gap: 8px; pointer-events: none }
+#unity-webgl-logo { float:left; width: 204px; height: 38px; background: url('webgl-logo.png') no-repeat center }
+#unity-build-title { float: right; margin-right: 10px; line-height: 38px; font-family: var(--font-data); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase }
+#unity-fullscreen-button { cursor: pointer; min-width: 112px; height: 44px; padding: 0 18px; border: 1px solid var(--hairline); border-radius: 999px; color: var(--ink); background: var(--glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); font: 700 12px var(--font-ui); letter-spacing: .1em; text-transform: uppercase; pointer-events: auto }
+#unity-webxr-link { float: left; margin-right: 10px; line-height: 38px; font-family: var(--font-ui); font-weight: 700; font-size: 13px; letter-spacing: .08em; text-transform: uppercase }
+.start-brand { font-family: var(--font-ui); font-size: 12px; font-weight: 700; letter-spacing: .2em; color: var(--mint); margin-bottom: 14px; text-transform: uppercase }
+.start-title { font-family: var(--font-display); font-size: clamp(40px, 6.5vw, 72px); font-weight: 600; line-height: 1.02; letter-spacing: .02em; color: #F8FAFC; margin-bottom: 34px; text-shadow: 0 8px 40px rgba(0, 0, 0, .6); text-transform: uppercase }
+.start-cta { display: inline-block; padding: 18px 40px; background: linear-gradient(180deg, var(--mint-light) 0%, #A9DDD1 100%); color: var(--on-mint); font: 700 15px var(--font-ui); border-radius: 999px; letter-spacing: .12em; text-transform: uppercase; box-shadow: 0 10px 28px rgba(180, 228, 218, .32), inset 0 1px 0 rgba(255, 255, 255, .6) }
