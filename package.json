@@ -1,9 +1,9 @@
 {
   "name": "adaptive-learning-tutor-gateway",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Protected AI tutor gateway and static WebGL host for the Unity Solar System lesson.",
+  "description": "Solaris tutor API on Google Gemini (the key stays on the server; the page gets short-lived voice tokens) and static WebGL host for the Unity Solar System lesson. No dependencies.",
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check server.mjs"

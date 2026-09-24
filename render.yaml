@@ -1,0 +1,18 @@
+# Render blueprint for the Solaris tutor API (render.com -> New -> Blueprint -> this repository).
+# The existing orbit-tutor-api service does not need it; it documents the settings and recreates
+# the service if ever needed. The Gemini key is NOT in this file: "sync: false" makes Render ask
+# for it when the blueprint is applied (or set it later under the service's Environment tab).
+services:
+  - type: web
+    name: orbit-tutor-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: "22"
