@@ -288,7 +288,7 @@ const liveTools = [{
 const liveActivityDetection = {
   endOfSpeechSensitivity: "END_SENSITIVITY_HIGH",
   prefixPaddingMs: 80,
-  silenceDurationMs: 350,
+  silenceDurationMs: 600,   // 350 cut children who pause mid-question (owner, 25 Sep 2026)
 };
 
 const reportSchema = {
