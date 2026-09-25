@@ -1,0 +1,18 @@
+# Keeps the free Render instance warm: it sleeps after 15 idle minutes and takes about a minute
+# to wake, which learners felt as "slow replies". A cheap /health call every 10 minutes prevents
+# the sleep (GitHub runs the schedule on the default branch; it pauses after 60 days without
+# commits, and a suspended service simply answers 503 until the owner resumes it).
+name: Keep the tutor API awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping /health
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 https://orbit-tutor-api.onrender.com/health || true)
+          echo "health answered $code"

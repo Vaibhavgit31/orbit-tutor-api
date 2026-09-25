@@ -26,7 +26,7 @@ Creating it from scratch instead: render.com → **New → Blueprint** → this 
 By hand: **New → Web Service**, build command `npm install`, start command `node server.mjs`,
 health check path `/health`, then the environment variable above.
 
-The free plan sleeps after 15 minutes without requests and takes about a minute to wake. The
+The free plan sleeps after 15 minutes without requests and takes about a minute to wake. `.github/workflows/keep-awake.yml` pings `/health` every 10 minutes so a resumed service never sleeps (run it once by hand from the Actions tab after resuming; GitHub pauses schedules after 60 days without commits). The
 player pings `/health` the moment its page opens (the download and the opening video cover the
 wake-up) and every few minutes while the lesson is in use. Until the API answers, Solaris uses
 her offline knowledge and the browser's voice; nothing is shown to the learner.
