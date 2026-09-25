@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | AI Powered Adaptive Learning</title>
+    <meta name="description" content="AI-powered adaptive solar-system learning experience with voice interaction and WebXR support.">
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <!-- Solaris's live voice talks to Google directly: look the name up while the player loads. -->
+    <link rel="dns-prefetch" href="https://generativelanguage.googleapis.com">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <!-- Lays out the learner's session report as a PDF (Plugins/WebGL/SessionReport.jslib). -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+    <style>
+      /* Critical layout is inline so a browser cannot reuse the fixed-size CSS
+         from an older WebXR build after Unity replaces files with the same names. */
+      html, body { width: 100%; height: 100%; padding: 0; margin: 0; overflow: hidden; background: #020712; }
+      #unity-container { position: fixed; inset: 0; left: 0; top: 0; width: 100vw; height: 100vh; height: 100dvh; transform: none; }
+      #unity-canvas-container { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+      #unity-canvas { display: block; width: 100% !important; height: 100% !important; }
+      #unity-footer { position: fixed; z-index: 20; right: 12px; bottom: 12px; width: auto; display: flex; gap: 8px; pointer-events: none; }
+      #unity-fullscreen-button { pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="unity-container">
+      <div id="unity-canvas-container" style="width: 100%; height: 100%;">
+        <canvas id="unity-canvas" style="width: 100%; height: 100%;"></canvas>
+      </div>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-loading-status">Preparing your journey…</div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-footer">
+        <button id="unity-fullscreen-button" type="button" aria-label="Enter fullscreen">FULLSCREEN</button>
+      </div>
+    </div>
+    <script src="TemplateData/data-parts.js"></script>
+    <script src="TemplateData/direct-mode.js"></script>
+    <script src="TemplateData/gemini-live.js"></script>
+    <script>
+      // Where the tutor API lives. Empty means the same origin (the Render
+      // service or a local node serves both page and API). The GitHub Pages
+      // publisher (Tools/Deploy/publish-pages.sh) writes the API address here
+      // (the Render service that holds the Gemini key: learners never enter one),
+      // and the page then sends the access code as a header instead of the
+      // same-site cookie the server sets for its own pages.
+      window.metabookApiBase = "https://orbit-tutor-api.onrender.com";
+      // Direct mode (DIRECT=1 publish only): no server, the browser's own service
+      // worker answers the tutor API with a Gemini key entered in this browser.
+      // The owner can also switch any page to it with ?setkey (TemplateData/direct-mode.js).
+      window.metabookDirectMode = false;
+      window.metabookApi = function (path) { return (window.metabookApiBase || "") + path; };
+      // Wake the tutor API the moment the page opens (owner, 24 Sep 2026: "the api should be in the
+      // backend and optimized"). Render's free instance sleeps after a quiet spell and needs about a
+      // minute to start; the player download and the opening video cover that. The answer also says
+      // whether the server wants an access code. Retries quietly for three minutes; nobody waits on it.
+      // True when a request to the API would be answered now: same origin, the owner's direct mode,
+      // or a remote API that answered the wake-up ping. While false, the player and the voice
+      // plug-in answer from Solaris's own knowledge instead of waiting on it.
+      window.metabookBackendReady = function () {
+        return !!(window.metabookDirectMode || window.metabookAccessCode === "direct" || !window.metabookApiBase || window.metabookBackendAwake);
+      };
+      var wakeBackend = function () {
+        var base = window.metabookApiBase;
+        if (!base || window.metabookDirectMode || !window.fetch) return Promise.resolve(null);
+        if (window.metabookBackendWaking) return window.metabookBackendWaking;
+        var startedAt = Date.now();
+        window.metabookBackendWaking = new Promise(function (resolve) {
+          var attempt = function () {
+            var controller = window.AbortController ? new AbortController() : null;
+            var timer = setTimeout(function () { if (controller) controller.abort(); }, 70000);
+            fetch(base + "/health", { cache: "no-store", signal: controller ? controller.signal : undefined })
+              .then(function (response) { return response.ok ? response.json() : null; })
+              .catch(function () { return null; })
+              .then(function (health) {
+                clearTimeout(timer);
+                if (health && health.ok) { window.metabookBackendAwake = true; window.metabookBackendWaking = null; resolve(health); return; }
+                if (Date.now() - startedAt < 180000) setTimeout(attempt, 4000); else { window.metabookBackendWaking = null; resolve(null); }
+              });
+          };
+          attempt();
+        });
+        return window.metabookBackendWaking;
+      };
+      // A request went unanswered (the API fell asleep again, or restarted): count it asleep, so the
+      // next question is answered at once from Solaris's own knowledge, and start waking it again.
+      window.metabookBackendAsleep = function (reason) {
+        if (!window.metabookApiBase || window.metabookDirectMode || window.metabookAccessCode === "direct") return;
+        window.metabookBackendAwake = false;
+        if (window.console) console.warn("Solaris: the tutor API did not answer (" + (reason || "request") + "); waking it again.");
+        wakeBackend();
+      };
+      try {
+        if (window.metabookApiBase && !window.metabookDirectMode) {
+          var link = document.createElement("link");
+          link.rel = "preconnect";
+          link.href = window.metabookApiBase;
+          link.crossOrigin = "anonymous";
+          document.head.appendChild(link);
+        }
+      } catch (e) {}
+      window.metabookBackendHealth = wakeBackend();
+      // Keep it awake while someone is using the lesson: Solaris's voice goes straight to Google, so a
+      // learner who only talks to her would otherwise let the API fall asleep under them. A light ping
+      // every four minutes while the page is visible and has been touched in the last quarter hour.
+      (function keepBackendAwake() {
+        if (!window.metabookApiBase || window.metabookDirectMode || !window.fetch) return;
+        var lastInput = Date.now();
+        ["pointerdown", "keydown", "touchstart"].forEach(function (name) {
+          document.addEventListener(name, function () { lastInput = Date.now(); }, { capture: true, passive: true });
+        });
+        setInterval(function () {
+          var base = window.metabookApiBase;
+          if (!base || window.metabookAccessCode === "direct" || document.visibilityState !== "visible" || Date.now() - lastInput > 15 * 60000) return;
+          // An API that woke after the wake-up loop gave up is counted awake from its first answer
+          // here; one that stops answering (asleep again) is counted asleep, and woken again.
+          var controller = window.AbortController ? new AbortController() : null;
+          var timer = setTimeout(function () { if (controller) controller.abort(); }, 8000);
+          fetch(base + "/health", { cache: "no-store", signal: controller ? controller.signal : undefined })
+            .then(function (response) { clearTimeout(timer); if (response.ok) window.metabookBackendAwake = true; })
+            .catch(function () { clearTimeout(timer); window.metabookBackendAsleep("keep-alive ping"); });
+        }, 4 * 60000);
+      })();
+      // One sentence splitter for the page, the voice plug-in and Tools/Voice/bake-voice.py:
+      // a sentence ends at . ! ? or an ellipsis followed by a space (so "2.5 times" stays whole).
+      window.metabookSplitSentences = function (text) {
+        var parts = String(text || "").replace(/\s+/g, " ").trim().match(/.*?[.!?…]+["”’)]*(?=\s|$)|.+$/g) || [];
+        return parts.map(function (part) { return part.trim(); }).filter(Boolean);
+      };
+      window.metabookApiHeaders = function (headers) {
+        headers = headers || {};
+        if (window.metabookApiBase && window.metabookAccessCode) headers["X-Access-Code"] = window.metabookAccessCode;
+        return headers;
+      };
+      // Solaris's voice for one sentence, as a Blob. The fixed sentences are recorded with the site
+      // (voice/<sha1("Leda|sentence")>.mp3, Tools/Voice/bake-voice-live.py): they come straight from here,
+      // at once and without using the voice quota; anything else is asked of the tutor API once and
+      // then kept in this browser (the same cache the service worker uses), so a reload or the next
+      // lesson on this device speaks it at once without asking again.
+      (function () {
+        var VOICE = "Leda";                      // the recorded voice: solaris-worker.js, server.mjs and Tools/Voice use the same
+        var VOICE_CACHE = "solaris-voice-v2";   // v1 held the old voice (Aoede)
+        var index = null;
+        function bakedIndex() {
+          if (!index) {
+            index = fetch("voice/index.json", { cache: "no-cache" })
+              .then(function (response) { return response.ok ? response.json() : []; })
+              .then(function (ids) { return new Set(Array.isArray(ids) ? ids : []); })
+              .catch(function () { return new Set(); });
+          }
+          return index;
+        }
+        // The plug-in asks, synchronously, whether a text is recorded: Unity lets its own answer speak
+        // first only then (a recorded line starts within milliseconds; an unrecorded one would wait
+        // seconds for a reading, longer than the live voice takes). The index is loaded once at page
+        // start; until it is here nothing counts as recorded. SHA-1 in plain code, since the browser's
+        // digest is asynchronous.
+        var recorded = null;
+        bakedIndex().then(function (set) { recorded = set; });
+        function sha1Sync(text) {
+          var bytes = new TextEncoder().encode(text);
+          var words = [];
+          for (var i = 0; i < bytes.length; i++) words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8);
+          words[bytes.length >> 2] |= 0x80 << (24 - (bytes.length % 4) * 8);
+          words[(((bytes.length + 8) >> 6) << 4) + 15] = bytes.length * 8;
+          var h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE, h3 = 0x10325476, h4 = 0xC3D2E1F0;
+          var w = new Array(80);
+          for (var j = 0; j < words.length; j += 16) {
+            var a = h0, b = h1, c = h2, d = h3, e = h4;
+            for (var t = 0; t < 80; t++) {
+              if (t < 16) w[t] = words[j + t] | 0;
+              else { var x = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]; w[t] = (x << 1) | (x >>> 31); }
+              var f, k;
+              if (t < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }
+              else if (t < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
+              else if (t < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+              else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+              var temp = (((a << 5) | (a >>> 27)) + f + e + k + w[t]) | 0;
+              e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = temp;
+            }
+            h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+          }
+          return [h0, h1, h2, h3, h4].map(function (v) { return ("00000000" + (v >>> 0).toString(16)).slice(-8); }).join("");
+        }
+        window.metabookIsRecorded = function (text) {
+          if (!recorded || !window.TextEncoder) return false;
+          var parts = window.metabookSplitSentences(text);
+          if (!parts.length) return false;
+          for (var i = 0; i < parts.length; i++) if (!recorded.has(sha1Sync(VOICE + "|" + parts[i]))) return false;
+          return true;
+        };
+        function sha1(text) {
+          if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) return Promise.resolve("");
+          return window.crypto.subtle.digest("SHA-1", new TextEncoder().encode(text)).then(function (digest) {
+            return Array.prototype.map.call(new Uint8Array(digest), function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+          }).catch(function () { return ""; });
+        }
+        // A tutor API that is still waking holds the request: after 10 s the line is given up and the
+        // plug-in says it with the browser's own voice instead of leaving a silence. The plug-in asks
+        // for all of an answer's sentences at once but plays them one after another, so a later one
+        // may take longer: 5 s more for each sentence ahead of it in the burst. The API is told how
+        // long the page will wait, and reads the line in that time or says no at once.
+        var burstAt = 0, burstIndex = 0;
+        function patience() {
+          var now = Date.now();
+          burstIndex = now - burstAt < 1500 ? burstIndex + 1 : 0;
+          burstAt = now;
+          return Math.min(30000, 10000 + 5000 * burstIndex);
+        }
+        function fromApi(text, waitMs) {
+          waitMs = waitMs || 10000;
+          // An API that has not answered the wake-up ping yet (metabookBackendAwake) is asleep or
+          // still starting: say no now, and the plug-in speaks the line with the browser's voice at
+          // once. Same-origin and direct (service worker) APIs are always awake; the recorded lines
+          // never come this way.
+          if (!window.metabookBackendReady()) {
+            return Promise.reject(new Error("the tutor service is still waking"));
+          }
+          var controller = window.AbortController ? new AbortController() : null;
+          var timer = controller ? setTimeout(function () { controller.abort(); }, waitMs) : null;
+          var answered = false;
+          return fetch(window.metabookApi("/api/speech"), {
+            method: "POST",
+            headers: window.metabookApiHeaders({ "Content-Type": "application/json", "X-Speech-Wait-Ms": String(waitMs) }),
+            body: JSON.stringify({ text: text }),
+            signal: controller ? controller.signal : undefined
+          }).then(function (response) {
+            answered = true;
+            if (!response.ok) throw new Error("speech " + response.status);
+            return response.blob();
+          }).then(function (blob) { clearTimeout(timer); return blob; }, function (error) {
+            clearTimeout(timer);
+            // No answer at all: the API is asleep again; the next lines are spoken at once by the browser.
+            if (!answered) window.metabookBackendAsleep("speech");
+            throw error;
+          });
+        }
+        function cached(id, text, waitMs) {
+          var key = new URL("__voice/" + id + ".wav", window.location.href).href;
+          var open = window.caches && id ? window.caches.open(VOICE_CACHE).catch(function () { return null; }) : Promise.resolve(null);
+          return open.then(function (cache) {
+            return (cache ? cache.match(key).catch(function () { return null; }) : Promise.resolve(null)).then(function (hit) {
+              if (hit) return hit.blob();
+              return fromApi(text, waitMs).then(function (blob) {
+                if (cache && blob && blob.size > 1000) cache.put(key, new Response(blob, { headers: { "Content-Type": blob.type || "audio/wav" } })).catch(function () {});
+                return blob;
+              });
+            });
+          });
+        }
+        window.metabookFetchSpeech = function (text) {
+          text = String(text || "").trim().slice(0, 1500);
+          var waitMs = patience();
+          return Promise.all([bakedIndex(), sha1(VOICE + "|" + text)]).then(function (found) {
+            var id = found[1];
+            if (!id || !found[0].has(id)) return cached(id, text, waitMs);
+            return fetch("voice/" + id + ".mp3").then(function (response) {
+              if (!response.ok) throw new Error("voice " + response.status);
+              return response.blob();
+            }).catch(function () { return fromApi(text, waitMs); });
+          });
+        };
+      })();
+      (function rememberAccessCode() {
+        window.metabookAccessCode = "";
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var code = params.get("code");
+          if (code) {
+            localStorage.setItem("metabookAccessCode", code);
+            params.delete("code");
+            var rest = params.toString();
+            history.replaceState(null, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+          }
+          window.metabookAccessCode = localStorage.getItem("metabookAccessCode") || "";
+        } catch (e) {}
+      })();
+      var buildUrl = "Build";
+      var buildVersion = new URLSearchParams(window.location.search).get("build") || "20260925-1559";
+      var assetVersion = "?v=" + encodeURIComponent(buildVersion);
+      var loaderUrl = buildUrl + "/WebGL.loader.js" + assetVersion;
+      var config = {
+        dataUrl: buildUrl + "/WebGL.data.unityweb" + assetVersion,
+        frameworkUrl: buildUrl + "/WebGL.framework.js.unityweb" + assetVersion,
+        codeUrl: buildUrl + "/WebGL.wasm.unityweb" + assetVersion,
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "AI Powered Adaptive Learning",
+        productVersion: "0.1.0",
+        autoSyncPersistentDataPath: true,
+        // Render at CSS pixels everywhere: the bloom pyramid and HDR target make
+        // every extra pixel expensive, and iPadOS reports itself as a Mac.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1),
+      };
+
+      var container = document.querySelector("#unity-container");
+      var canvas = document.querySelector("#unity-canvas");
+      var canvasContainer = document.querySelector("#unity-canvas-container");
+      var loadingBar = document.querySelector("#unity-loading-bar");
+      var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var loadingStatus = document.querySelector("#unity-loading-status");
+      var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+      var unityInstance = null;
+
+      // The page plays the opening film itself (owner, 25 Sep 2026: "the web takes too long to
+      // initialize"). TAP TO ENTER is up within a second of opening the page; the tap starts the
+      // film in an HTML <video> while the 163 MB player downloads, unpacks and starts behind it,
+      // and the film's end is the cue for the intro flight. Unity's OpeningVideoPlayer is told
+      // where the film stands (OnPageVideoPlaying once the picture really moves, OnPageVideoEnded)
+      // and only preloads the intro and switches to it; it plays the film itself only when the
+      // page cannot (the old path, OnUserStartExperience). This object is the page's side of that
+      // contract: tapped (the gesture happened), playing (the page owns the film: Unity must not
+      // play its own), started (the browser really plays it), ended, failed, and held (paused
+      // behind the access-code prompt).
+      window.metabookPageVideo = { tapped: false, playing: false, started: false, ended: false, failed: false, held: false };
+      var pageVideo = window.metabookPageVideo;
+      var startOverlay = null, startStatus = null;
+      // TAP TO ENTER waits for the player (owner, 25 Sep 2026: "the tap must come when the app is
+      // fully ready"): the overlay shows the brand and the loader's progress at once, the button is
+      // dimmed and inert until the instance exists, then the tap plays the film from the page.
+      var playerReady = false;
+      var videoOverlay = null, videoStatus = null, videoElement = null;
+      var videoWantsTouch = false;
+      var sent = { playing: false, ended: false, start: false };
+      var instanceCreatedAt = 0;
+      // Unity draws its "Made with Unity" splash over every canvas for the first seconds of the
+      // instance, so the page's black stays up at least this long after it before fading: the
+      // learner sees black, then the intro, never the splash (Unity's own veil is black underneath).
+      var SPLASH_HOLD_MS = 4000;
+
+      function sendToOpeningVideo(method) {
+        if (!unityInstance) return;
+        try { unityInstance.SendMessage("Opening Video", method); } catch (e) {}
+      }
+
+      // Tells Unity where the page's film stands. Safe to call from any event, any number of
+      // times: each message goes once, and only once the instance exists. OnPageVideoPlaying
+      // waits for the picture to move, not for play() to be called: a play() refused after the
+      // instance exists must still take the old path, never skip the film.
+      function syncUnity() {
+        if (!unityInstance) return;
+        if (pageVideo.failed) {
+          // The old path (this browser cannot play the film, or refused to) and the take-over
+          // (the film broke part-way: Unity's gate then plays its own copy in place of ours).
+          if (pageVideo.tapped && !pageVideo.held && !sent.start) { sent.start = true; sendToOpeningVideo("OnUserStartExperience"); }
+          return;
+        }
+        if (pageVideo.started || pageVideo.ended) {
+          if (!sent.playing) { sent.playing = true; sendToOpeningVideo("OnPageVideoPlaying"); }
+          if (pageVideo.ended && !sent.ended) { sent.ended = true; releaseToIntro(); }
+        }
+      }
+
+      // The loader's status line ("Downloading Solar System · 42% · …", "Unpacking…", "Loading … N%",
+      // "Ready") is mirrored under TAP TO ENTER and, after the film, in the black overlay while
+      // Unity finishes; the loading bar itself stays hidden behind the overlays.
+      function mirrorStatus() {
+        var text = loadingStatus ? loadingStatus.textContent : "";
+        var failed = !!(loadingBar && loadingBar.classList.contains("failed"));
+        if (startStatus) {
+          startStatus.textContent = text;
+          if (failed) startStatus.classList.add("failed"); else startStatus.classList.remove("failed");
+        }
+        if (videoStatus && !videoWantsTouch) {
+          videoStatus.textContent = failed || /^Preparing/.test(text) ? text : "Preparing your journey · " + text;
+          if (failed) videoStatus.classList.add("failed"); else videoStatus.classList.remove("failed");
+        }
+      }
+      (function watchLoadingStatus() {
+        if (!loadingStatus || !loadingBar) return;
+        if (window.MutationObserver) {
+          new MutationObserver(mirrorStatus).observe(loadingStatus, { childList: true, characterData: true, subtree: true });
+          new MutationObserver(mirrorStatus).observe(loadingBar, { attributes: true, attributeFilter: ["class"] });
+        } else {
+          setInterval(mirrorStatus, 250);
+        }
+      })();
+
+      function setLoadingFailed(text) {
+        if (loadingBar) loadingBar.classList.add("failed");
+        if (loadingStatus) loadingStatus.textContent = text;
+        mirrorStatus();
+      }
+
+      // Unity makes its AudioContext when the player starts, which is now long after the tap.
+      // Chrome, Edge and Firefox count the earlier tap, and Unity's own retry (every 400 ms,
+      // inside the framework: the page cannot reach that context) starts it. iPad and iPhone
+      // Safari do not: a context made outside a gesture stays suspended until the next touch,
+      // and the intro flight would open mute. So the tap makes the context itself, running, and
+      // the first plain `new AudioContext()` after it (Unity's, at engine start) is handed that
+      // one; any other (Solaris's voice, the microphone meter) is made as usual.
+      var NativeAudioContext = window.AudioContext || window.webkitAudioContext || null;
+      var handedAudioContext = null, handedAudioContextTaken = false;
+      function unlockUnityAudio() {
+        if (!NativeAudioContext || handedAudioContext || unityInstance) return;   // a player made before the tap resumes on the tap itself
+        try {
+          handedAudioContext = new NativeAudioContext();
+          var resumed = handedAudioContext.resume();
+          if (resumed && resumed.catch) resumed.catch(function () {});
+        } catch (e) { handedAudioContext = null; return; }
+        var Handed = function (options) {
+          if (handedAudioContext && !handedAudioContextTaken && options === undefined) {
+            handedAudioContextTaken = true;
+            window.AudioContext = NativeAudioContext;
+            return handedAudioContext;
+          }
+          return options === undefined ? new NativeAudioContext() : new NativeAudioContext(options);
+        };
+        Handed.prototype = NativeAudioContext.prototype;
+        window.AudioContext = Handed;
+      }
+      function dropUnusedAudioContext() {
+        if (!handedAudioContext || handedAudioContextTaken) return;
+        window.AudioContext = NativeAudioContext;
+        try { var closed = handedAudioContext.close(); if (closed && closed.catch) closed.catch(function () {}); } catch (e) {}
+        handedAudioContext = null;
+      }
+
+      // Whether Unity's sound can start now. The handed context answers for itself; otherwise a
+      // context made here and now, outside any gesture, runs exactly when Unity's would.
+      function checkUnityAudio(done) {
+        if (handedAudioContextTaken && handedAudioContext && handedAudioContext.state === "running") { done(true); return; }
+        if (!NativeAudioContext) { done(true); return; }
+        var probe;
+        try { probe = new NativeAudioContext(); } catch (e) { done(true); return; }
+        var finished = false, timer = null;
+        var finish = function () {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          var ready = probe.state === "running";
+          try { var closed = probe.close(); if (closed && closed.catch) closed.catch(function () {}); } catch (e) {}
+          done(ready);
+        };
+        if (probe.state === "running") { finish(); return; }
+        timer = setTimeout(finish, 400);
+        try { var resumed = probe.resume(); if (resumed && resumed.then) resumed.then(finish, finish); } catch (e) { finish(); }
+      }
+
+      // The film is over and the player exists: the intro follows, with sound. Where the browser
+      // will not start Unity's sound without a touch (iPad, when the hand-over above did not
+      // take), the black overlay asks for one first; Unity's own listeners (mousedown, touchstart)
+      // resume the context on it. Then Unity is cued and the page's black fades once the splash
+      // is surely gone.
+      function releaseToIntro() {
+        checkUnityAudio(function (ready) {
+          if (ready) { cueIntro(); return; }
+          videoWantsTouch = true;
+          if (videoStatus) { videoStatus.textContent = "Tap to continue"; videoStatus.classList.remove("failed"); }
+          var touched = false;
+          var onTouch = function () {
+            if (touched) return;
+            touched = true;
+            ["click", "touchend", "keydown"].forEach(function (name) { document.removeEventListener(name, onTouch, true); });
+            videoWantsTouch = false;
+            cueIntro();
+          };
+          ["click", "touchend", "keydown"].forEach(function (name) { document.addEventListener(name, onTouch, true); });
+        });
+      }
+      // Unity is cued; the page's black goes when Unity says its own veil is black (the
+      // OpeningVideo_PageCovered hook, after its splash), or after SPLASH_HOLD_MS should that
+      // word never come (an older build).
+      function cueIntro() {
+        var released = false;
+        window.metabookOpeningCovered = function () { if (released) return; released = true; hideVideoOverlay(); };
+        sendToOpeningVideo("OnPageVideoEnded");
+        setTimeout(function () { window.metabookOpeningCovered(); }, Math.max(1500, SPLASH_HOLD_MS - (Date.now() - instanceCreatedAt)));
+      }
+
+      // The film (about 4 Mbps) and the 163 MB download share the line. While the film runs
+      // thin the download waits (data-parts.js asks here before each piece), so the picture
+      // never freezes for it; the download loses at most the film's length.
+      var downloadHold = null, downloadRelease = null;
+      function holdDownload(on) {
+        if (on && !downloadHold) downloadHold = new Promise(function (resolve) { downloadRelease = resolve; });
+        if (!on && downloadHold) { var release = downloadRelease; downloadHold = null; downloadRelease = null; release(); }
+      }
+      window.metabookDownloadHold = function () { return downloadHold; };
+
+      // Whether the API wants an access code (ACCESS_CODE on the host) is learnt from its wake-up
+      // answer while the learner reads TAP TO ENTER, so the tap can act on it at once. On a static
+      // host the API is elsewhere and cannot show its own prompt: the page asks once and keeps the
+      // code in localStorage. An API that is asleep or unreachable asks nothing (Solaris quietly
+      // uses her offline knowledge until it answers), and one that answers only just after the
+      // tap gets a moment more: the film starts, and is held behind the prompt if a code is wanted.
+      var access = { known: false, required: false, waiters: [] };
+      function settleAccess(health) {
+        if (access.known) return;
+        access.known = true;
+        access.required = !!(health && health.accessRequired);
+        var waiters = access.waiters;
+        access.waiters = [];
+        waiters.forEach(function (waiter) { waiter(); });
+      }
+      if (!window.metabookApiBase || window.metabookAccessCode) settleAccess(null);
+      else Promise.resolve(window.metabookBackendHealth).then(settleAccess, function () { settleAccess(null); });
+      function whenAccessSettled(waiter, graceMs) {
+        if (access.known) { waiter(); return; }
+        access.waiters.push(waiter);
+        setTimeout(function () { settleAccess(null); }, graceMs);
+      }
+
+      function askForAccessCode(onReady) {
+        var gate = document.createElement("div");
+        gate.id = "access-gate";
+        gate.style.cssText = "position:fixed;inset:0;background:rgba(2,7,18,0.92);display:flex;align-items:center;justify-content:center;z-index:1000;";
+        gate.innerHTML = '<form style="background:#101B26;border:1px solid rgba(180,228,218,0.25);border-radius:16px;padding:28px;width:min(92vw,380px);text-align:center;color:#EDF3F7;font:16px/1.6 system-ui,sans-serif">' +
+          '<div style="font-size:18px;font-weight:600;margin-bottom:6px">AI Solar System</div>' +
+          '<div style="color:#95A8B9;font-size:14px;margin-bottom:18px">Enter the access code to open this build.</div>' +
+          '<input name="code" type="password" autocomplete="off" placeholder="Access code" style="width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid rgba(180,228,218,0.3);background:#020712;color:#EDF3F7;font:inherit">' +
+          '<button type="submit" style="width:100%;margin-top:12px;padding:12px;border:0;border-radius:10px;background:#B4E4DA;color:#071A1E;font:inherit;font-weight:600">Enter</button>' +
+          '<div class="bad" style="color:#f87171;font-size:13px;margin-top:10px;min-height:1.4em"></div></form>';
+        var form = gate.querySelector("form");
+        var input = gate.querySelector("input");
+        var note = gate.querySelector(".bad");
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          var code = (input.value || "").trim();
+          if (!code) return;
+          note.textContent = "Checking...";
+          fetch(window.metabookApi("/api/access"), { headers: { "X-Access-Code": code } }).then(function (response) {
+            if (response.status === 401 || response.status === 403) { note.textContent = "That code is not right."; return; }
+            accept(code);
+          }).catch(function () {
+            // The API may be asleep; keep the code and let the tutor report later.
+            accept(code);
+          });
+        });
+        function accept(code) {
+          window.metabookAccessCode = code;
+          try { localStorage.setItem("metabookAccessCode", code); } catch (e) {}
+          gate.remove();
+          onReady();
+        }
+        document.body.appendChild(gate);
+        try { input.focus(); } catch (e) {}
+      }
+
+      // Up the moment the page's script runs, before the player is even asked for: the learner
+      // taps at once and the film covers the download. The tap is the browser's user gesture
+      // that unlocks sound, so the film's play() runs from it.
+      function showStartOverlay() {
+        var overlay = document.createElement("div");
+        overlay.id = "start-overlay";
+        overlay.className = playerReady ? "" : "waiting";
+        overlay.style.cssText = "position:fixed;inset:0;background:rgba(2,7,18,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999;cursor:pointer;-webkit-tap-highlight-color:transparent;";
+        overlay.innerHTML = '<div style="text-align:center;color:#fff;pointer-events:none;padding:20px;">' +
+          '<div class="start-brand">METABOOK AI</div>' +
+          '<div class="start-title">INTERACTIVE SOLAR SYSTEM</div>' +
+          '<div class="start-cta">' +
+          'TAP TO ENTER' +
+          '</div>' +
+          '<div class="start-status" id="start-status"></div></div>';
+        startOverlay = overlay;
+        startStatus = overlay.querySelector("#start-status");
+        var begun = false, nudgeTimer = 0;
+        function nudge() {   // a tap before the player is ready briefly brightens the progress line
+          overlay.classList.add("nudge");
+          clearTimeout(nudgeTimer);
+          nudgeTimer = setTimeout(function () { overlay.classList.remove("nudge"); }, 700);
+        }
+        function onStart() {
+          // touchend and click both fire on a tap; the entry runs once.
+          if (begun) return;
+          if (!playerReady) { nudge(); return; }   // not fully loaded yet: the tap waits (the button is dimmed)
+          begun = true;
+          pageVideo.tapped = true;
+          // iPad/iPhone: one audio element unlocked by this tap is what Solaris's voice plays through later.
+          try {
+            window.metabookUnlockedAudio = new Audio("data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQIAAACAgA==");
+            window.metabookUnlockedAudio.play().catch(function () {});
+          } catch (e) {}
+          unlockUnityAudio();
+          // Warm the opening narration during the cinematic so the voice starts
+          // together with the captions instead of two or three seconds later.
+          // These strings must match the prelude and invitation lines in
+          // SolarSystemTutorController; the voice plug-in reuses the audio.
+          try {
+            window.metabookSpeechPrefetch = window.metabookSpeechPrefetch || {};
+            [
+              "Countless stars stretch across the darkness. This is the Milky Way, our home galaxy. Somewhere within it lies a small region we call home. Our Solar System.",
+              "I'm Solaris, your AI exploration guide. I can explain each world, focus the view, guide you to planets, and help you test what you discover."
+            ].forEach(function (line) { window.metabookSplitSentences(line).forEach(function (text) {   // the plug-in asks for these lines sentence by sentence
+              window.metabookSpeechPrefetch[text] = window.metabookFetchSpeech(text);
+              window.metabookSpeechPrefetch[text].catch(function () {});
+            }); });
+          } catch(e) {}
+          if (canvas) {
+            try { canvas.focus(); } catch(e) {}
+          }
+          removeStartOverlay();
+          // The film starts here, inside the tap: Safari lets a video play with sound only from
+          // the gesture's own call stack (not from a timer over a second, not from a fetch
+          // answer). An access code, when the API wants one, is asked over the film with the
+          // film held: an element once started by a gesture may be resumed later without one.
+          // A browser that cannot play MP4 leaves the film to Unity (the old path).
+          if (!canPlayPageVideo()) { pageVideoFailed("this browser cannot play MP4"); return; }
+          startPageVideo();
+          whenAccessSettled(function () { if (access.required) holdForAccessCode(); }, 1500);
+        }
+        // Not once-only: a tap while the player still loads must not use the listener up
+        // (the `begun` guard keeps the start single-shot).
+        overlay.addEventListener("click", onStart);
+        overlay.addEventListener("touchend", onStart);
+        document.body.appendChild(overlay);
+        mirrorStatus();
+      }
+
+      function removeStartOverlay() {
+        if (!startOverlay) return;
+        startOverlay.remove();
+        startOverlay = null;
+        startStatus = null;
+      }
+
+      function canPlayPageVideo() {
+        try { return !!document.createElement("video").canPlayType("video/mp4"); } catch (e) { return false; }
+      }
+
+      // The same file Unity streams (StreamingAssets/opening.mp4), letterboxed on black like
+      // Unity's RawImage, above the canvas and the loading bar but under the FULLSCREEN button.
+      // Not skippable: taps and keys do nothing, and a pause from outside (a media key) is undone.
+      function startPageVideo() {
+        var overlay = document.createElement("div");
+        overlay.id = "opening-video-overlay";
+        var video = document.createElement("video");
+        video.id = "opening-video";
+        video.setAttribute("playsinline", "");
+        video.setAttribute("webkit-playsinline", "");
+        video.setAttribute("disablepictureinpicture", "");
+        video.setAttribute("disableremoteplayback", "");
+        video.preload = "auto";
+        video.tabIndex = -1;
+        video.src = config.streamingAssetsUrl + "/opening.mp4";
+        var status = document.createElement("div");
+        status.id = "opening-video-status";
+        overlay.appendChild(video);
+        overlay.appendChild(status);
+        var swallow = function (event) { event.preventDefault(); event.stopPropagation(); };
+        ["click", "dblclick", "contextmenu", "keydown", "keyup"].forEach(function (name) { overlay.addEventListener(name, swallow); });
+        video.addEventListener("pause", function () {
+          if (pageVideo.ended || pageVideo.failed || pageVideo.held || video.ended || videoElement !== video || document.hidden) return;
+          try { var again = video.play(); if (again && again.catch) again.catch(function () {}); } catch (e) {}
+        });
+        // The picture moves: Unity may now be told. The download waits while the film runs thin
+        // (no more than it can play through, or a stall) and goes on once it flows again: on
+        // "canplaythrough", or after 8 s of smooth playing where a browser never says so.
+        var lastWaitingAt = 0;
+        video.addEventListener("playing", function () { if (videoElement === video) pageVideoStarted(); });
+        video.addEventListener("waiting", function () { if (videoElement === video && !pageVideo.held && !pageVideo.ended) { lastWaitingAt = video.currentTime; holdDownload(true); } });
+        video.addEventListener("canplaythrough", function () { holdDownload(false); });
+        video.addEventListener("timeupdate", function () {
+          if (videoElement !== video || !downloadHold) return;
+          if (video.readyState >= 4 || video.currentTime - lastWaitingAt > 8) holdDownload(false);
+        });
+        video.addEventListener("ended", pageVideoEnded);
+        video.addEventListener("error", function () { pageVideoFailed("the film could not be loaded"); });
+        videoOverlay = overlay;
+        videoStatus = status;
+        videoElement = video;
+        container.appendChild(overlay);
+        // From here Unity must not play its own copy (a refusal turns this off again).
+        pageVideo.playing = true;
+        holdDownload(true);   // the film's first buffer gets the whole line
+        playPageVideo(video);
+        // Nothing may hold the learner on a frozen frame for good: a film that shows no first
+        // frame in 30 s (refused, broken) goes to the old path; one that stops moving for 60 s
+        // after it began (a dead stream) is handed back to Unity, which takes over with its own
+        // copy. Time only counts while the page is visible and the film is not held: a locked
+        // tablet or a background tab pauses the film, and it goes on when the page is back.
+        var lastTime = -1, lastAdvance = Date.now();
+        var watchdog = setInterval(function () {
+          if (pageVideo.ended || pageVideo.failed || videoElement !== video) { clearInterval(watchdog); return; }
+          if (document.hidden || pageVideo.held) { lastAdvance = Date.now(); return; }
+          if (video.currentTime !== lastTime) { lastTime = video.currentTime; lastAdvance = Date.now(); return; }
+          if (Date.now() - lastAdvance > (pageVideo.started ? 60000 : 30000)) pageVideoFailed(pageVideo.started ? "no progress for 60 s" : "no first frame in 30 s");
+        }, 1000);
+        mirrorStatus();
+      }
+
+      function playPageVideo(video) {
+        var promise = null;
+        try { promise = video.play(); } catch (e) { pageVideoFailed(e && e.message ? e.message : "play threw"); return; }
+        if (promise && promise.then) promise.then(function () { if (videoElement === video) pageVideoStarted(); }, function (error) {
+          // The pause that holds the film behind the code prompt interrupts the play() before it: not a refusal.
+          if (pageVideo.held && videoElement === video) return;
+          pageVideoFailed(error && error.message ? error.message : "play refused");
+        });
+      }
+
+      // A tablet locked or a tab put away pauses the film and stops its play() while hidden:
+      // it goes on from where it was when the page is back (the watchdog waits meanwhile).
+      document.addEventListener("visibilitychange", function () {
+        var video = videoElement;
+        if (document.hidden || !video || pageVideo.ended || pageVideo.failed || pageVideo.held || !video.paused || video.ended) return;
+        try { var again = video.play(); if (again && again.catch) again.catch(function () {}); } catch (e) {}
+      });
+
+      function pageVideoStarted() {
+        if (pageVideo.started || pageVideo.ended || pageVideo.failed) return;
+        pageVideo.started = true;
+        syncUnity();
+      }
+
+      // The API wants a code: the film pauses (at its start, a second in at most) under the
+      // prompt and starts over once the code is in. The watchdog and the download hold rest
+      // while it is held.
+      function holdForAccessCode() {
+        var video = videoElement;
+        if (!video || pageVideo.ended || pageVideo.failed || pageVideo.held) return;
+        pageVideo.held = true;
+        if (videoOverlay) videoOverlay.classList.add("held");
+        try { video.pause(); } catch (e) {}
+        holdDownload(false);
+        askForAccessCode(function () {
+          pageVideo.held = false;
+          if (videoElement !== video || pageVideo.failed) { syncUnity(); return; }   // it broke under the prompt: Unity plays it now
+          if (videoOverlay) videoOverlay.classList.remove("held");
+          try { video.currentTime = 0; } catch (e) {}
+          holdDownload(true);
+          playPageVideo(video);
+        });
+      }
+
+      // The film is over: Unity fades to the intro. Until the player exists the black overlay
+      // stays, with the loading line in its centre, and the cue goes the moment it is created.
+      function pageVideoEnded() {
+        if (pageVideo.ended || pageVideo.failed) return;
+        pageVideo.ended = true;
+        pageVideo.started = true;
+        holdDownload(false);
+        if (videoOverlay) videoOverlay.classList.add("waiting");
+        mirrorStatus();
+        syncUnity();
+      }
+
+      // play() refused, the file broken, or nothing moving for too long: back to the old
+      // behaviour, Unity plays the film itself once it is ready (its own stall watchdog covers
+      // a refusal there). After the picture moved this is a take-over, and Unity's gate treats
+      // it as one.
+      function pageVideoFailed(reason) {
+        if (pageVideo.ended || pageVideo.failed) return;
+        pageVideo.failed = true;
+        pageVideo.playing = false;
+        holdDownload(false);
+        if (window.console) console.warn("Solaris: the page could not play the opening film (" + (reason || "unknown") + "); the player will.");
+        var overlay = videoOverlay, video = videoElement;
+        videoOverlay = null;
+        videoStatus = null;
+        videoElement = null;
+        releaseVideo(video);
+        if (overlay) overlay.remove();
+        if (!unityInstance && loadingBar) loadingBar.style.display = "block";   // the old picture: the bar until the player is ready
+        syncUnity();
+      }
+
+      // Unity is black underneath (its scene renders black and its veil covers), so the overlay
+      // simply fades out over the switch.
+      function hideVideoOverlay() {
+        var overlay = videoOverlay, video = videoElement;
+        videoOverlay = null;
+        videoStatus = null;
+        videoElement = null;
+        if (!overlay) return;
+        overlay.classList.add("fading");
+        setTimeout(function () { releaseVideo(video); overlay.remove(); }, 700);
+      }
+
+      function releaseVideo(video) {
+        if (!video) return;
+        try { video.pause(); } catch (e) {}
+        try { video.removeAttribute("src"); video.load(); } catch (e) {}
+      }
+
+      function requestPageFullscreen() {
+        var root = document.documentElement;
+        var request = root.requestFullscreen || root.webkitRequestFullscreen || root.msRequestFullscreen;
+        if (!request) return;
+        try { var result = request.call(root); if (result && result.catch) result.catch(function () {}); } catch (e) {}
+      }
+
+      // The loading bar stays hidden: TAP TO ENTER mirrors its status line, and it is only shown
+      // when the page could not play the film and the learner is waiting on the player.
+      showStartOverlay();
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = function () {
+        // The data file may be published in parts (TemplateData/data-parts.js);
+        // which Solaris the page talks to (the tutor API, or the owner's own key
+        // with ?setkey) is settled before the player starts, so the first health
+        // check already sees it. Learners are never asked for anything here.
+        metabookLoadDataParts(config, buildUrl, assetVersion, loadingStatus, progressBarFull)
+          .then(function () { return window.metabookSolarisSetup ? metabookSolarisSetup(loadingStatus) : window.metabookDirectMode ? metabookDirectSetup(loadingStatus) : undefined; })
+          .then(function () {
+            return createUnityInstance(canvas, config, function (progress) {
+              progressBarFull.style.width = 100 * progress + "%";
+              if (loadingStatus) loadingStatus.textContent = "Loading Solar System · " + Math.round(progress * 100) + "%";
+            });
+          })
+          .then(function (instance) {
+            unityInstance = instance;
+            instanceCreatedAt = Date.now();
+            playerReady = true;
+            if (startOverlay) startOverlay.classList.remove("waiting");
+            dropUnusedAudioContext();   // made at a tap that came after the engine's own context: not needed
+            // The film waits behind the page's tap (the browser's user gesture): the scene's
+            // own fallback start is for pages without a gate, so it is told there is one.
+            sendToOpeningVideo("OnPageGate");
+            if (loadingStatus) loadingStatus.textContent = "Ready · tap to begin";
+            loadingBar.style.display = "none";
+            // Then where the film stands: OnPageVideoPlaying once its picture moves (and
+            // OnPageVideoEnded when it is already over), or OnUserStartExperience when the page
+            // could not play it and the learner has tapped. Nothing yet when the learner has
+            // not tapped: the tap does it.
+            syncUnity();
+          })
+          .catch(function (message) {
+            setLoadingFailed("Unable to start on this device. Close other tabs, reload, and use current Chrome or Edge. " + message);
+          });
+      };
+      script.onerror = function () {
+        setLoadingFailed("The application loader could not be downloaded. Check your connection and reload.");
+      };
+      document.body.appendChild(script);
+      if (fullscreenButton) {
+        fullscreenButton.onclick = function () {
+          // The film lives outside the canvas, so while it is up the whole page goes
+          // fullscreen; afterwards Unity takes the canvas fullscreen as before.
+          if (videoOverlay) requestPageFullscreen(); else if (unityInstance) unityInstance.SetFullscreen(1);
+        };
+      }
+      // The VR and AR entry buttons were retired from the page: the WebXR
+      // package still initialises without them, and only Fullscreen remains.
+    </script>
+  </body>
+</html>
