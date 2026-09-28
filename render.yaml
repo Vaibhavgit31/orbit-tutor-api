@@ -2,6 +2,8 @@
 # The existing orbit-tutor-api service does not need it; it documents the settings and recreates
 # the service if ever needed. The Gemini key is NOT in this file: "sync: false" makes Render ask
 # for it when the blueprint is applied (or set it later under the service's Environment tab).
+# Since the Groq migration the service needs GROQ_API_KEY (and AI_PROVIDER=groq); the Gemini key
+# is only for a rollback (AI_PROVIDER=gemini).
 services:
   - type: web
     name: orbit-tutor-api
@@ -12,6 +14,11 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      # Groq (26 Sep 2026): speech to text, answers and Solaris's voice; AI_PROVIDER=gemini rolls back.
+      - key: AI_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: NODE_VERSION

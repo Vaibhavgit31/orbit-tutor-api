@@ -5,6 +5,10 @@ key and answers the routes the WebGL player calls; learners never see or enter a
 contains only the server (no dependencies), so it deploys in seconds. The player itself is on
 GitHub Pages and calls this service across sites.
 
+## Groq (since 26 Sep 2026)
+
+The API now runs on Groq: `AI_PROVIDER=groq` and `GROQ_API_KEY` in the service's environment (Whisper for speech to text, GPT-OSS 120B for answers, Orpheus for Solaris's voice, `GROQ_TTS_VOICE` optional). `AI_PROVIDER=gemini` with `GEMINI_API_KEY` is the rollback. See `Docs/GROQ_MIGRATION.md` in the project repository.
+
 ## Deploy on Render (free)
 
 The service already exists as `orbit-tutor-api` (https://orbit-tutor-api.onrender.com):

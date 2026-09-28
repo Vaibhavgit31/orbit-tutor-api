@@ -1,5 +1,15 @@
-// Solaris tutor API on Google Gemini (owner, 24 Sep 2026: "user don't need to put api in start,
-// the api should be written in backend and optimized").
+// Solaris tutor API (owner, 24 Sep 2026: "user don't need to put api in start, the api should be
+// written in backend and optimized").
+//
+// PROVIDERS (migration of 26 Sep 2026, Docs/GROQ_MIGRATION.md). AI_PROVIDER picks the active one:
+//   groq   (default when GROQ_API_KEY is set)  Whisper large v3 for speech to text, GPT-OSS 120B for
+//          answers (streamed), SolarisKnowledgeBank entries as the verified source of facts. No Gemini
+//          Live: /health reports voiceMode "transcribe", so the player records one utterance and uploads it.
+//   gemini (legacy, the rollback)  everything below as it was: Gemini text, Gemini Live voice.
+//   offline  no provider: /health says so and the player answers from its own knowledge.
+// TTS_PROVIDER: groq (Orpheus; the default with AI_PROVIDER groq) | gemini (the default with AI_PROVIDER
+// gemini) | none (the player speaks with its recorded lines and the browser's voice). Keys stay in this
+// process; none is ever sent to the page.
 //
 // The Gemini key lives here, in the host's environment (GEMINI_API_KEY), and nowhere else: learners
 // never see a key prompt and the published site holds no key. The routes, prompts, schema, facts,
@@ -27,6 +37,10 @@ import { once } from "node:events";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createGroqClient, GroqError } from "./providers/groq-client.mjs";
+import { createGroqVoice, ORPHEUS_VOICES } from "./providers/groq-voice.mjs";
+import { loadKnowledge } from "./providers/knowledge.mjs";
+import { buildSolarisMessages, cleanTranscript } from "./providers/solaris-prompt.mjs";
 
 loadDotEnv();
 
@@ -65,6 +79,54 @@ function listFromEnv(name, fallback) {
 
 const port = Number(process.env.PORT || 8787);
 const apiKey = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+
+// ---------------------------------------------------------------- provider selection
+const groqKey = String(process.env.GROQ_API_KEY || "").trim();
+const aiProvider = (() => {
+  const chosen = String(process.env.AI_PROVIDER || "").trim().toLowerCase();
+  if (chosen === "groq" || chosen === "gemini" || chosen === "offline") return chosen;
+  return groqKey ? "groq" : apiKey ? "gemini" : "offline";
+})();
+const ttsProvider = (() => {
+  const chosen = String(process.env.TTS_PROVIDER || "").trim().toLowerCase();
+  if (chosen === "gemini" || chosen === "groq" || chosen === "none") return chosen;
+  // Step 2 of the migration: Solaris's voice follows the answers (Groq -> Orpheus). Gemini's voice is
+  // kept for the rollback (AI_PROVIDER=gemini) or on request (TTS_PROVIDER=gemini).
+  if (aiProvider === "groq" && groqKey) return "groq";
+  return apiKey && aiProvider !== "offline" ? "gemini" : "none";
+})();
+const GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL || "openai/gpt-oss-120b";
+const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3";
+const GROQ_TTS_MODEL = process.env.GROQ_TTS_MODEL || "canopylabs/orpheus-v1-english";
+const GROQ_TTS_VOICE = ORPHEUS_VOICES.includes(String(process.env.GROQ_TTS_VOICE || "").trim().toLowerCase()) ? String(process.env.GROQ_TTS_VOICE).trim().toLowerCase() : "hannah";
+const GROQ_REASONING = ["low", "medium", "high"].includes(process.env.GROQ_REASONING_EFFORT) ? process.env.GROQ_REASONING_EFFORT : "low";
+const STT_TIMEOUT_MS = Number(process.env.STT_TIMEOUT_MS || 8000);
+const LLM_FIRST_TOKEN_MS = Number(process.env.LLM_FIRST_TOKEN_MS || 8000);
+const LLM_TOTAL_MS = Number(process.env.LLM_TOTAL_MS || 15000);
+
+// Diagnostic lines in the reliability audit's format. Never a key, never an audio payload.
+function diag(level, category, event, fields) {
+  const parts = Object.entries(fields || {}).filter(([, value]) => value !== undefined && value !== "")
+    .map(([key, value]) => key + "=" + (typeof value === "string" ? (/[\s"=]/.test(value) ? JSON.stringify(value.slice(0, 200)) : value) : JSON.stringify(value)));
+  const line = "[SOLARIS]" + (level === "error" ? "[ERROR]" : level === "warn" ? "[WARN]" : "") + "[" + new Date().toISOString().slice(11, 23) + "][" + category + "] " + event + (parts.length ? " " + parts.join(" ") : "");
+  (level === "error" ? console.error : level === "warn" ? console.warn : console.log)(line);
+}
+const groq = (aiProvider === "groq" || ttsProvider === "groq") && groqKey
+  ? createGroqClient({
+      apiKey: groqKey,
+      baseUrl: process.env.GROQ_BASE_URL || undefined,   // tests point this at a local stand-in
+      maxRetries: Math.max(0, Math.min(2, Number(process.env.GROQ_MAX_RETRIES ?? 1))),
+      log: (level, label, fields) => diag(level, label, fields.event || "event", { ...fields, event: undefined }),
+    })
+  : null;
+const groqVoice = ttsProvider === "groq" && groq
+  ? createGroqVoice({ groq, model: GROQ_TTS_MODEL, voice: GROQ_TTS_VOICE, log: (level, category, event, fields) => diag(level, category, event, fields) })
+  : null;
+const knowledgePath = process.env.KNOWLEDGE_BANK_PATH || fileURLToPath(new URL("../Assets/AIAdaptiveLearning/Resources/Solaris/knowledge-bank.json", import.meta.url));
+const knowledge = (() => { try { return loadKnowledge(knowledgePath); } catch (error) { diag("error", "KB", "load-failed", { error: error.message }); return { size: 0, retrieve: () => [], version: "" }; } })();
+const groqActive = aiProvider === "groq" && Boolean(groq);
+let requestCounter = 0;
+const nextRequestId = (prefix) => prefix + "-" + (++requestCounter).toString(36) + "-" + Date.now().toString(36).slice(-4);
 // Measured 24 Sep 2026: 3.5 Flash-Lite with minimal thinking starts answering in about 1.0 s;
 // 3.1 Flash-Lite is the fallback when the first is busy, out of quota or retired.
 const TEXT_MODELS = listFromEnv("GEMINI_TEXT_MODELS", ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]);
@@ -507,7 +569,7 @@ const server = createServer({ noDelay: true }, async (request, response) => {
   // The health probe answers before anything else and does no work: Render polls it, and the page
   // pings it the moment it opens to wake a sleeping instance while the player downloads.
   if ((request.method === "GET" || request.method === "HEAD") && requestUrl.pathname === "/health") {
-    warmGoogle();
+    if (aiProvider === "gemini" || ttsProvider === "gemini") warmGoogle();
     sendJson(response, 200, healthReport());
     return;
   }
@@ -543,33 +605,40 @@ const server = createServer({ noDelay: true }, async (request, response) => {
     return;
   }
 
+  // Each route goes to the active provider; the Gemini handlers stay as they were (AI_PROVIDER=gemini).
   if (request.method === "GET" && requestUrl.pathname === "/api/realtime/session") {
+    if (aiProvider !== "gemini") { sendJson(response, 503, { error: "Live voice is not used on this server." }); return; }
     await handleRealtimeSession(requestUrl, response);
     return;
   }
 
   if (request.method === "POST" && requestUrl.pathname === "/api/tutor/stream") {
-    await handleTutorStreamRequest(request, response);
+    await (aiProvider === "gemini" ? handleTutorStreamRequest : handleGroqTutorStream)(request, response);
     return;
   }
 
   if (request.method === "POST" && requestUrl.pathname === "/api/tutor") {
-    await handleTutorRequest(request, response);
+    await (aiProvider === "gemini" ? handleTutorRequest : handleGroqTutorRequest)(request, response);
     return;
   }
 
   if (request.method === "POST" && requestUrl.pathname === "/api/report") {
-    await handleReportRequest(request, response);
+    await (aiProvider === "gemini" ? handleReportRequest : handleGroqReportRequest)(request, response);
     return;
   }
 
   if (request.method === "POST" && requestUrl.pathname === "/api/transcribe") {
-    await handleTranscribeRequest(request, response);
+    await (aiProvider === "gemini" ? handleTranscribeRequest : handleGroqTranscribeRequest)(request, response);
     return;
   }
 
   if (request.method === "POST" && requestUrl.pathname === "/api/speech") {
-    await handleSpeechRequest(request, response);
+    if (ttsProvider === "none") {
+      // No server voice: answered at once, so the page speaks the line with its recorded voice or the browser's.
+      sendJson(response, 503, { error: "Speech output is not configured on this server." });
+      return;
+    }
+    await (ttsProvider === "groq" ? handleGroqSpeechRequest : handleSpeechRequest)(request, response);
     return;
   }
 
@@ -622,7 +691,37 @@ const server = createServer({ noDelay: true }, async (request, response) => {
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
+// Names the voice the server speaks with; the page keeps its spoken lines per voice, so a change of
+// voice (or a rollback) never plays lines recorded in the other one. "Leda" is Gemini's (the recorded one).
+function ttsVoiceTag() {
+  return ttsProvider === "groq" ? "orpheus-" + GROQ_TTS_VOICE : ttsProvider === "gemini" ? VOICE : "";
+}
+
 function healthReport() {
+  const report = geminiHealthReport();
+  if (aiProvider === "gemini") return { ...report, provider: "gemini", ttsProvider, ttsVoice: ttsVoiceTag() };
+  // Groq (or no provider): no live voice, so the player records one utterance and uploads it.
+  return {
+    ...report,
+    provider: aiProvider,
+    aiConfigured: groqActive,
+    model: groqActive ? GROQ_CHAT_MODEL : "",
+    voiceMode: "transcribe",
+    sttModel: groqActive ? GROQ_STT_MODEL : "",
+    ttsProvider,
+    ttsModel: ttsProvider === "groq" ? GROQ_TTS_MODEL : ttsProvider === "gemini" ? TTS_MODELS[0] : "",
+    ttsVoice: ttsVoiceTag(),
+    ttsPaused: groqVoice ? groqVoice.status().paused : false,
+    realtimeConfigured: false,
+    realtimeModel: "",
+    realtimeTranscriptionModel: "",
+    liveWordsModel: "",
+    liveReading: ttsProvider === "gemini" && typeof WebSocket === "function",
+    knowledgeEntries: knowledge.size,
+  };
+}
+
+function geminiHealthReport() {
   return {
     ok: true,
     deploymentRevision: process.env.RENDER_GIT_COMMIT || "local",
@@ -1405,6 +1504,309 @@ async function handleSpeechRequest(request, response) {
   }
 }
 
+// ================================================================ Groq provider (26 Sep 2026)
+// Speech to text: Groq Whisper large v3. Answers: GPT-OSS 120B, streamed, with SolarisKnowledgeBank
+// entries as the verified source of facts. Timeouts and retries: providers/groq-client.mjs. Every
+// failure answers the player quickly with an error it recovers from (its knowledge bank, then the
+// offline tutor, then "tap to try again"); nothing here can leave it waiting.
+
+// Text as it is streamed to the player: markdown marks dropped, line breaks and runs of spaces made
+// one space. The final answer is exactly what was streamed: Unity speaks sentences as they complete,
+// and a final text that did not start with what it already spoke would be spoken again.
+function createSpokenStream(limit = 700) {
+  let sent = "";
+  let lastRaw = "\n";
+  let closed = false;
+  return {
+    push(piece) {
+      if (closed) return "";
+      let out = "";
+      for (const char of String(piece)) {
+        const rawBefore = lastRaw;
+        lastRaw = char;
+        if ("*_#`>|".includes(char)) continue;
+        if ((char === "-" || char === "•") && (rawBefore === "\n")) continue;   // a list mark at a line start
+        const isSpace = /\s/.test(char);
+        const previous = (sent + out).slice(-1);
+        if (isSpace && (!previous || previous === " ")) continue;              // no leading or doubled spaces
+        out += isSpace ? " " : char;
+      }
+      if (sent.length + out.length > limit) {
+        // Past the spoken-length cap: stop at the last sentence end inside it.
+        const room = (sent + out).slice(0, limit);
+        const end = Math.max(room.lastIndexOf(". "), room.lastIndexOf("! "), room.lastIndexOf("? "));
+        const keep = end > sent.length ? end + 1 : sent.length;
+        out = room.slice(sent.length, keep);
+        closed = true;
+      }
+      sent += out;
+      return out;
+    },
+    get text() { return sent; },
+    get closed() { return closed; },
+  };
+}
+
+function groqFailureStatus(error) {
+  if (error instanceof GroqError) {
+    if (error.status === 429) return 503;
+    if (error.kind === "timeout" || error.kind === "first-token-timeout") return 504;
+  }
+  return 502;
+}
+
+function groqRetryAfterHeader(error) {
+  return error instanceof GroqError && error.retryAfterMs ? { "Retry-After": String(Math.ceil(error.retryAfterMs / 1000)) } : undefined;
+}
+
+async function handleGroqTutorStream(request, response) {
+  const id = nextRequestId("llm");
+  if (!groqActive) {
+    sendJson(response, 503, { error: "AI tutor is not configured on this server." });
+    return;
+  }
+  let lessonRequest;
+  try {
+    lessonRequest = await readLessonRequest(request);
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  const startedAt = Date.now();
+  const bankKey = answerBankKey(lessonRequest);
+  const cached = lookupAnswer(bankKey);
+  if (cached) {
+    diag("info", "LLM", "cache-hit", { id, question: lessonRequest.studentMessage });
+    response.writeHead(200, { ...sseHeaders, "X-Answer-Source": "bank" });
+    response.end(sse("delta", { text: cached.message }) + sse("done", { reply: cached, timing: { totalMs: Date.now() - startedAt, firstDeltaMs: 0, cached: true, provider: "groq" } }));
+    return;
+  }
+
+  const verified = knowledge.retrieve(lessonRequest.studentMessage, { selectedObject: lessonRequest.selectedObject || "" });
+  const messages = buildSolarisMessages(lessonRequest, verified);
+  diag("info", "LLM", "request-start", { id, model: GROQ_CHAT_MODEL, reasoning: GROQ_REASONING, question: lessonRequest.studentMessage, selected: lessonRequest.selectedObject || "", knowledge: verified.map((item) => item.id).join(","), history: (lessonRequest.conversationHistory || []).length });
+
+  // The player gave up or asked something else: stop paying for the rest of this answer.
+  const cancel = new AbortController();
+  let finished = false;
+  response.on("close", () => { if (!finished) cancel.abort(); });
+  const spoken = createSpokenStream(700);
+  // The stream opens at once: the page counts a request with no response after 12 s as a sleeping
+  // backend, and a slow Groq answer (up to LLM_TOTAL_MS) must not look like one. Failures from here on
+  // arrive as an "error" event, which the player answers from its own knowledge.
+  response.writeHead(200, sseHeaders);
+  response.write(": solaris\n\n");
+  let headersSent = true;
+  let firstDeltaAt = 0;
+  const emit = (event, data) => { if (!response.writableEnded && !response.destroyed) response.write(sse(event, data)); };
+
+  let result;
+  try {
+    result = await groq.chatStream({
+      messages, model: GROQ_CHAT_MODEL, reasoningEffort: GROQ_REASONING, temperature: 0.5, maxTokens: 700,
+      firstTokenMs: LLM_FIRST_TOKEN_MS, totalMs: LLM_TOTAL_MS, signal: cancel.signal,
+      onDelta: (piece) => {
+        const text = spoken.push(piece);
+        if (!text) return;
+        if (!headersSent) { response.writeHead(200, sseHeaders); headersSent = true; }
+        if (!firstDeltaAt) firstDeltaAt = Date.now();
+        emit("delta", { text });
+      },
+    });
+  } catch (error) {
+    finished = true;
+    if (error instanceof GroqError && error.kind === "aborted") { diag("info", "LLM", "cancelled-by-player", { id }); return; }
+    diag("error", "LLM", "failed", { id, status: error.status || 0, kind: error.kind || "error", error: error.message, ms: Date.now() - startedAt, fallback: "player knowledge bank" });
+    if (!headersSent) sendJson(response, groqFailureStatus(error), { error: "AI tutor is temporarily unavailable." }, groqRetryAfterHeader(error));
+    else { emit("error", { error: "AI tutor is temporarily unavailable." }); response.end(); }
+    return;
+  }
+  finished = true;
+  if (response.destroyed) return;
+  const message = spoken.text;
+  if (!message.trim()) {
+    diag("error", "LLM", "empty-answer", { id, ms: Date.now() - startedAt });
+    if (!headersSent) sendJson(response, 502, { error: "AI tutor is temporarily unavailable." });
+    else { emit("error", { error: "AI tutor is temporarily unavailable." }); response.end(); }
+    return;
+  }
+  const reply = { message, outcome: "neutral", actions: [] };
+  if (!result.truncated) rememberAnswer(bankKey, reply);
+  const timing = { totalMs: Date.now() - startedAt, firstDeltaMs: firstDeltaAt ? firstDeltaAt - startedAt : 0, model: GROQ_CHAT_MODEL, provider: "groq", attempts: result.attempts, truncated: result.truncated, knowledge: verified.length };
+  diag("info", "LLM", "complete", { id, firstTokenMs: timing.firstDeltaMs, totalMs: timing.totalMs, attempts: result.attempts, truncated: result.truncated, chars: message.length });
+  if (!headersSent) response.writeHead(200, sseHeaders);
+  emit("done", { reply, timing });
+  response.end();
+}
+
+async function handleGroqTutorRequest(request, response) {
+  const id = nextRequestId("llm");
+  if (!groqActive) {
+    sendJson(response, 503, { error: "AI tutor is not configured on this server." });
+    return;
+  }
+  let lessonRequest;
+  try {
+    lessonRequest = await readLessonRequest(request);
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  const bankKey = answerBankKey(lessonRequest);
+  const cached = lookupAnswer(bankKey);
+  if (cached) { sendJson(response, 200, cached, { "X-Answer-Source": "bank" }); return; }
+  const verified = knowledge.retrieve(lessonRequest.studentMessage, { selectedObject: lessonRequest.selectedObject || "" });
+  const startedAt = Date.now();
+  diag("info", "LLM", "request-start", { id, model: GROQ_CHAT_MODEL, stream: false, question: lessonRequest.studentMessage, knowledge: verified.map((item) => item.id).join(",") });
+  try {
+    const result = await groq.chat({ messages: buildSolarisMessages(lessonRequest, verified), model: GROQ_CHAT_MODEL, reasoningEffort: GROQ_REASONING, maxTokens: 700, timeoutMs: LLM_TOTAL_MS });
+    const spoken = createSpokenStream(700);
+    spoken.push(result.text);
+    const reply = { message: spoken.text.trim() || "Let's keep exploring the Solar System.", outcome: "neutral", actions: [] };
+    rememberAnswer(bankKey, reply);
+    diag("info", "LLM", "complete", { id, totalMs: Date.now() - startedAt, attempts: result.attempts });
+    sendJson(response, 200, reply);
+  } catch (error) {
+    diag("error", "LLM", "failed", { id, status: error.status || 0, kind: error.kind || "error", error: error.message, fallback: "player knowledge bank" });
+    sendJson(response, groqFailureStatus(error), { error: "AI tutor is temporarily unavailable." }, groqRetryAfterHeader(error));
+  }
+}
+
+async function handleGroqTranscribeRequest(request, response) {
+  const id = nextRequestId("stt");
+  if (!groqActive) {
+    sendJson(response, 503, { error: "Speech-to-text is not configured on this server." });
+    return;
+  }
+  let audio;
+  try {
+    audio = await readRequestBytes(request, 8_000_000);
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  if (audio.length < 800) {
+    sendJson(response, 400, { error: "No audio was captured." });
+    return;
+  }
+  const mimeType = String(request.headers["content-type"] || "audio/webm").split(";")[0].trim() || "audio/webm";
+  const durationMs = Number(request.headers["x-metabook-duration-ms"] || 0);
+  const startedAt = Date.now();
+  diag("info", "STT", "request-start", { id, model: GROQ_STT_MODEL, bytes: audio.length, mimeType, audioMs: durationMs || undefined, stop: String(request.headers["x-metabook-stop-reason"] || "") });
+  const cancel = new AbortController();
+  response.on("close", () => { if (!response.writableEnded) cancel.abort(); });
+  try {
+    const result = await groq.transcribe({ audio, mimeType, model: GROQ_STT_MODEL, prompt: sttPrompt, language: "en", timeoutMs: STT_TIMEOUT_MS, budgetMs: STT_TIMEOUT_MS + 2500, signal: cancel.signal });
+    const text = cleanTranscript(result.text);
+    diag("info", "STT", "complete", { id, status: 200, ms: result.ms, attempts: result.attempts, transcript: text, dropped: text ? undefined : (result.text || "").trim().slice(0, 60) || "(empty)" });
+    sendJson(response, 200, { text });
+  } catch (error) {
+    if (error instanceof GroqError && error.kind === "aborted") return;
+    diag("error", "STT", "failed", { id, status: error.status || 0, kind: error.kind || "error", error: error.message, ms: Date.now() - startedAt });
+    sendJson(response, groqFailureStatus(error), { error: "Speech-to-text is temporarily unavailable." }, groqRetryAfterHeader(error));
+  }
+}
+
+async function handleGroqReportRequest(request, response) {
+  if (!groqActive) {
+    sendJson(response, 503, { error: "AI tutor is not configured on this server." });
+    return;
+  }
+  let session;
+  try {
+    session = JSON.parse(await readRequestBody(request, 64_000));
+    if (!session || typeof session !== "object") throw new Error("Session record must be a JSON object.");
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  const record = {
+    durationSeconds: Number(session.durationSeconds) || 0,
+    worldsVisited: Array.isArray(session.worldsVisited) ? session.worldsVisited.slice(0, 12) : [],
+    questions: (Array.isArray(session.questions) ? session.questions : []).slice(0, 30).map((entry) => ({ question: String(entry?.question || "").slice(0, 300), answer: String(entry?.answer || "").slice(0, 400) })),
+    quiz: (Array.isArray(session.quiz) ? session.quiz : []).slice(0, 40).map((entry) => ({ prompt: String(entry?.prompt || "").slice(0, 300), learnerAnswers: String(entry?.learnerAnswers || "").slice(0, 300), correctAnswer: String(entry?.correctAnswer || "").slice(0, 200), correct: Boolean(entry?.correct), attempts: Number(entry?.attempts) || 0 })),
+    level: String(session.level || ""),
+    masteryPercent: Number(session.masteryPercent) || 0,
+  };
+  try {
+    const result = await groq.chat({
+      messages: [
+        { role: "system", content: reportInstructions + "\nReply only with a JSON object with the keys summary (string), scoreOutOfTen (integer 0-10), topicsCovered, strengths, needsWork, nextQuestions (arrays of short strings)." },
+        { role: "user", content: JSON.stringify(record) },
+      ],
+      model: GROQ_CHAT_MODEL, reasoningEffort: GROQ_REASONING, maxTokens: 900, json: true, timeoutMs: 25000,
+    });
+    const analysis = JSON.parse(result.text || "{}");
+    const clampList = (value, limit) => (Array.isArray(value) ? value : []).map((item) => String(item).slice(0, 240)).slice(0, limit);
+    sendJson(response, 200, {
+      summary: String(analysis.summary || "").slice(0, 900),
+      scoreOutOfTen: Math.max(0, Math.min(10, Math.round(Number(analysis.scoreOutOfTen) || 0))),
+      topicsCovered: clampList(analysis.topicsCovered, 8),
+      strengths: clampList(analysis.strengths, 4),
+      needsWork: clampList(analysis.needsWork, 4),
+      nextQuestions: clampList(analysis.nextQuestions, 5),
+    });
+  } catch (error) {
+    diag("error", "LLM", "report-failed", { status: error.status || 0, error: error.message });
+    sendJson(response, 502, { error: "The report assessment is temporarily unavailable." });
+  }
+}
+
+// Solaris's voice on Groq Orpheus (providers/groq-voice.mjs). Every failure is answered at once with
+// 503: the page then says the line with the browser's own voice (the recorded lines never come here),
+// so a missing voice never stalls Solaris. Identical lines share one reading and are cached.
+const groqSpeechInFlight = new Map();
+async function handleGroqSpeechRequest(request, response) {
+  if (!groqVoice) {
+    sendJson(response, 503, { error: "Speech output is not configured on this server." });
+    return;
+  }
+  let text = "";
+  try {
+    const payload = JSON.parse(await readRequestBody(request, 8_000));
+    text = typeof payload?.text === "string" ? payload.text.trim().slice(0, 1200) : "";
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+  if (!text) { sendJson(response, 400, { error: "text is required." }); return; }
+  const key = "orpheus|" + GROQ_TTS_VOICE + "|" + text;
+  const sendWav = (wav, source) => {
+    response.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": wav.length, "Cache-Control": "no-store", "X-Voice-Source": source });
+    response.end(wav);
+  };
+  const hit = speechCache.get(key);
+  if (hit) { diag("info", "TTS", "cache-hit", { chars: text.length }); sendWav(hit, "cache"); return; }
+
+  // The page says how long it will wait for this line; the reading must be back a second before that.
+  const waitMs = Math.min(15000, Math.max(3000, (Number(request.headers["x-speech-wait-ms"]) || 10000) - 1000));
+  let pending = groqSpeechInFlight.get(key);
+  const shared = Boolean(pending);
+  if (!pending) {
+    const id = nextRequestId("tts");
+    diag("info", "TTS", "request-start", { id, chars: text.length, voice: GROQ_TTS_VOICE, waitMs });
+    pending = groqVoice.speak(text, { timeoutMs: waitMs })
+      .then((result) => {
+        speechCache.set(key, result.wav, result.wav.length);
+        diag("info", "TTS", "complete", { id, ms: result.ms, pieces: result.pieces, bytes: result.wav.length, chars: text.length });
+        return result;
+      }, (error) => {
+        if (error.reason === "paused") diag("info", "FALLBACK", "tts-browser-voice", { id, reason: "voice paused", pausedForS: Math.round((error.pausedMs || 0) / 1000) });
+        else diag("warn", "TTS", "failed", { id, reason: error.reason, status: error.status || 0, error: error.message, fallback: "browser voice" });
+        throw error;
+      })
+      .finally(() => groqSpeechInFlight.delete(key));
+    groqSpeechInFlight.set(key, pending);
+  }
+  try {
+    const result = await pending;
+    sendWav(result.wav, shared ? "shared" : "groq");
+  } catch (error) {
+    const headers = error.pausedMs ? { "Retry-After": String(Math.max(1, Math.ceil(error.pausedMs / 1000))) } : undefined;
+    sendJson(response, 503, { error: "Speech output is temporarily unavailable." }, headers);
+  }
+}
+
 // ---------------------------------------------------------------- voice debugging (VOICE_DEBUG=1)
 async function saveVoiceDebugAudio(audio, extension, capture) {
   try {
@@ -1726,18 +2128,31 @@ await loadAnswerBank();
 server.listen(port, () => {
   console.log(`Solaris tutor API listening on http://localhost:${port}`);
   console.log(`Serving Unity WebGL files from ${webRoot}`);
-  console.log(apiKey
+  if (aiProvider === "gemini") console.log(apiKey
     ? `Gemini: ${TEXT_MODELS.join(" > ")} (text), ${LIVE_MODEL} (live voice${liveWordsEnabled ? ", words by " + WORDS_MODEL : ""}), ${TTS_MODELS[0]} voice ${VOICE}`
     : "GEMINI_API_KEY is not set; Unity will use its offline tutor and the browser's voice.");
-  console.log(`Voice mode: ${apiKey ? voiceMode : "transcribe"}; access code ${accessCode ? "required" : "off"}; CORS ${anyOrigin ? "any origin" : pagesOrigins.concat(extraOrigins).join(", ") + " and localhost"}`);
+  else console.log(`Provider: ${aiProvider}${groqActive ? ` (Groq: ${GROQ_STT_MODEL} speech to text, ${GROQ_CHAT_MODEL} answers, reasoning ${GROQ_REASONING})` : ""}; voice: ${ttsProvider}${ttsVoiceTag() ? " (" + ttsVoiceTag() + ")" : ""}`);
+  console.log(`Voice mode: ${aiProvider === "gemini" && apiKey ? voiceMode : "transcribe"}; access code ${accessCode ? "required" : "off"}; CORS ${anyOrigin ? "any origin" : pagesOrigins.concat(extraOrigins).join(", ") + " and localhost"}`);
   if (voiceDebugDir) {
     console.log(`Voice debug ON: recordings and transcripts are saved to ${voiceDebugDir}`);
   }
-  verifyModels();
+  if (aiProvider === "gemini" || ttsProvider === "gemini") verifyModels();
+  diag("info", "SERVER", "providers", { ai: aiProvider, stt: aiProvider === "groq" ? GROQ_STT_MODEL : aiProvider, llm: aiProvider === "groq" ? GROQ_CHAT_MODEL : aiProvider, reasoning: aiProvider === "groq" ? GROQ_REASONING : undefined, tts: ttsProvider, ttsVoice: ttsVoiceTag() || undefined, knowledgeEntries: knowledge.size, groqKey: groqKey ? "set" : "missing" });
+  if (aiProvider === "groq" && !groq) diag("error", "SERVER", "AI_PROVIDER is groq but GROQ_API_KEY is missing: answers come from the player's own knowledge");
   assembleSplitWebGlData();
 });
 
 // Render stops the old instance with SIGTERM on every deploy: finish the answer bank write first.
+// A stray rejection or exception is logged with its stack instead of passing unseen (audit P8).
+// Node ends the process on an uncaught exception, so that stays as it was, but it now says why.
+process.on("unhandledRejection", (reason) => {
+  console.error("[SOLARIS][SERVER] unhandled rejection:", reason && reason.stack ? reason.stack : reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("[SOLARIS][SERVER] uncaught exception:", error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+
 process.on("SIGTERM", () => {
   saveAnswerBankNow().finally(() => server.close(() => process.exit(0)));
   setTimeout(() => process.exit(0), 5000).unref();

@@ -74,5 +74,25 @@
     "targets": []
    }
   ]
+ },
+ "solar-scope-v1||why mars is so red||mars": {
+  "message": "Mars looks red because its surface is covered with iron oxide, or rust. The rusted dust reflects sunlight with a reddish hue, giving the planet its famous color.",
+  "outcome": "neutral",
+  "actions": []
+ },
+ "solar-scope-v1||take me back to solar system||saturn": {
+  "message": "Tap Back to space at the top of the screen, and we'll return to the Solar System overview.",
+  "outcome": "neutral",
+  "actions": []
+ },
+ "solar-scope-v1||hey solaris||jupiter": {
+  "message": "Hi there! I’m Solaris, your space‑explorer guide—let’s start our journey. Which planet would you like to explore first?",
+  "outcome": "neutral",
+  "actions": []
+ },
+ "solar-scope-v1||take me to a planet which has a ring||earth": {
+  "message": "Sure! Let’s head to Saturn, the planet famous for its spectacular rings. Would you like to explore its rings up close?",
+  "outcome": "neutral",
+  "actions": []
  }
 }
